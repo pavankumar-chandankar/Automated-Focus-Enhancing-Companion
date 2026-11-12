@@ -1,0 +1,23 @@
+services:
+  api:
+    build: .
+    environment:
+      FOCUSBUDDY_LLM_MODE: ${FOCUSBUDDY_LLM_MODE:-mock}
+      FOCUSBUDDY_LLM_BASE_URL: ${FOCUSBUDDY_LLM_BASE_URL:-https://api.openai.com/v1}
+      FOCUSBUDDY_LLM_MODEL: ${FOCUSBUDDY_LLM_MODEL:-}
+      FOCUSBUDDY_LLM_API_KEY: ${FOCUSBUDDY_LLM_API_KEY:-}
+      FOCUSBUDDY_API_TOKEN: ${FOCUSBUDDY_API_TOKEN:-}
+      FOCUSBUDDY_DB_PATH: /app/var/focusbuddy.sqlite3
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - focusbuddy-state:/app/var
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  focusbuddy-state: {}

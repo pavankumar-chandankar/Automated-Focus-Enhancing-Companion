@@ -1,0 +1,23 @@
+name: Security hygiene
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e '.[dev]'
+      - name: Run privacy, injection and contract tests
+        run: pytest tests/test_privacy.py tests/test_prompt_guardrails.py tests/test_provider.py -q
+      - name: Check for accidentally checked-in dot-env secrets
+        run: |
+          if test -f .env; then echo 'Found root .env secret file'; exit 1; fi
+          if grep -R -l -E 'sk-[A-Za-z0-9]{28,}|AKIA[0-9A-Z]{16}' --include='*.py' --include='*.md' --exclude-dir=legacy .; then
+            echo 'Potential secret-like string detected'; exit 1;
+          fi

@@ -1,99 +1,100 @@
-# Focus Buddy: Automated focus enhancing companion
+# Focus Buddy
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Version](https://img.shields.io/badge/version-1.0.0-brightgreen.svg)
-![Platform](https://img.shields.io/badge/platform-Windows-informational.svg)
+A small assistant that helps you get back to work after an interruption. It suggests a next step, says why, and you can always say no.
 
-## Overview
+It started in 2024 as **MayDay**, an HCI course project at the University of Siegen by Azarang Etemadi, Pavankumar Chandankar and Gururaj Shetty. We interviewed people about interruptions at work, built personas and wireframes, and ran an enactment session. The 18-page report is in [`legacy/`](legacy/Autonomous_System_AI_Work_Companion.pdf).
 
-**Focus Enhancer** is a C#-based application designed to help users maintain focus during work sessions by tracking their activity and offering real-time interventions. It monitors active windows, tracks idle time, and captures keyboard input to analyze user engagement. Based on this data, the application can suggest breaks, block distracting websites, or adjust focus goals.
+The first code from 2024 was a set of separate scripts, including a keystroke logger. In 2026 I rebuilt it as a proper app: a FastAPI backend, a React UI and an optional LLM, without the logging.
 
-## Features
+## What the 2024 study found
 
-- **Active Window Tracking**: Monitors and logs the title of the currently active window.
-- **Idle Time Detection**: Tracks the amount of time the user is idle.
-- **Keystroke Logging**: Captures keyboard input to detect user activity.
-- **Custom Interventions**: Suggests breaks or other interventions based on user behavior.
-- **Secure Data Handling**: Encrypts user data using AES encryption for security.
+We did five semi-structured interviews, grouped the answers with affinity mapping, and tested the revised design in one enactment session. The main points:
 
-## Getting Started
+- People want to decide when they take a break. Fixed reminders annoyed them; they wanted snooze and off.
+- Being told "you seem anxious" right before a presentation makes things worse, not better.
+- A fixed schedule for checking email does not work when urgent messages can come in.
+- After an interruption, a short reminder of where you were helps more than a motivational message.
+- Tracking is only acceptable if the person controls what is collected.
 
-### Prerequisites
+All five interviewees were students with part-time jobs, so this is a small first look, not a representative study. More detail is in [research/2024_mayday_study.md](research/2024_mayday_study.md).
 
-- **.NET Framework**: Ensure that the .NET Framework is installed on your machine.
-- **Visual Studio** (or any C# IDE): You need a C# development environment to run and modify the code.
+## What the app does
 
-### Installation
+1. You start a session and choose two things separately: whether your numbers are saved locally, and whether your text may be sent to an external model.
+2. You enter how long you have worked, how much of that was focused or idle, and how often you switched tasks. You can add a goal and a short note.
+3. A rule-based policy decides if a suggestion is allowed at all. Quiet mode, snooze and a maximum number of nudges per hour are checked here, in code, not by the model.
+4. If a suggestion is allowed, the backend builds a prompt and asks the model. The default model is an offline mock. An OpenAI-compatible endpoint can be configured instead.
+5. The answer must be valid JSON with a rationale, the numbers it used, an uncertainty note and a dismiss or snooze option. Anything that fails these checks, or uses pressure like "you must", is replaced by a neutral fallback.
+6. You accept, snooze or dismiss. You can delete the session and everything stored with it.
 
-1. **Clone the repository**:
-    ```bash
-    git clone https://github.com/pavan1609/Automated-Focus-Enhancing-Companion.git
-    cd Automated-Focus-Enhancing-Companion
-    ```
+Each design decision, and the 2024 finding it comes from, is listed in [docs/research_to_code_traceability.md](docs/research_to_code_traceability.md).
 
-2. **Open the project**:
-   - Open the project in Visual Studio or your preferred C# IDE.
+## How it is built
 
-3. **Restore NuGet packages**:
-   - Restore any required NuGet packages that the project depends on.
+| Part | What it is |
+| --- | --- |
+| Backend | Python, FastAPI, Pydantic. Session, coaching, consent and delete endpoints (`backend/focusbuddy/api/app.py`) |
+| LLM | Two versioned system prompts, an OpenAI-compatible HTTP client, JSON output checks and a fallback (`backend/focusbuddy/llm/`) |
+| UI | React + TypeScript with Vite (`frontend/`) |
+| Storage | SQLite, only with consent, sessions expire after 14 days |
+| Desktop | A small C# library that keeps the same counters (`desktop/`). It is not connected to the UI yet, so for now the numbers are typed in by hand. |
+| Tests | 59 pytest tests for consent, storage, the policy, the prompts and the output checks. GitHub Actions also builds the UI, the C# library and the Docker image. |
 
-4. **Build the project**:
-   - Build the solution in Visual Studio.
+## Run it
 
-### Usage
+Needs Python 3.10+ and Node.js.
 
-1. **Run the application**:
-   - Once the project is built, run the application. It will start tracking your activity immediately.
+```bash
+git clone https://github.com/pavankumar-chandankar/Automated-Focus-Enhancing-Companion.git
+cd Automated-Focus-Enhancing-Companion
+python -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev]'
+pytest -q
+uvicorn focusbuddy.api.app:app --host 127.0.0.1 --port 8000
+```
 
-2. **Monitor Activity**:
-   - The console will display the active window title, idle time, and captured keystrokes.
+In a second terminal:
 
-3. **Modify Logic**:
-   - You can customize the focus-enhancing logic in the `ActivityTracker.cs` file to better suit your needs.
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
-### Files and Directories
+Then open http://127.0.0.1:5173.
 
-- `ActivityTracker.cs`: Main file containing the logic for tracking user activity.
-- `encryption.py`: Python script used for AES encryption of user data.
-- `frontend/`: Contains the React frontend files for the dashboard.
-- `backend/`: Contains the Python backend files for handling encrypted data and storing user activity.
+To use a real model instead of the mock, set these before starting the backend (see `.env.example`):
 
-### Roadmap
+```bash
+export FOCUSBUDDY_LLM_MODE=openai_compatible
+export FOCUSBUDDY_LLM_BASE_URL=https://api.openai.com/v1
+export FOCUSBUDDY_LLM_MODEL=<model name>
+export FOCUSBUDDY_LLM_API_KEY=<your key>
+```
 
-- **Integration with WebSocket Server**: Real-time updates to the dashboard.
-- **Advanced Distraction Analysis**: More sophisticated ML algorithms to detect distractions.
-- **Cross-Platform Support**: Extend support to Mac and Linux.
-- **User Reports**: Provide detailed weekly/monthly reports to the user.
+You also have to tick "Allow sending my goal and note to an external model" in the UI. Without it nothing is sent.
 
-## Contributing
+## What it is not
 
-Contributions are welcome! Please fork this repository, create a new branch for your feature or bugfix, and submit a pull request.
+- It has not been tested with users. The 2024 study was about the design, not this software.
+- The default model is a mock that returns fixed text. I have not evaluated the prompts against a real model yet.
+- The output checks are a JSON schema plus regex. They catch obvious problems but are not a full defence against prompt injection.
+- It does not track anything in the background, and it does not try to guess how you feel.
 
-### Steps to Contribute
+## Repository
 
-1. Fork the repository.
-2. Create a new branch:
-    ```bash
-    git checkout -b feature-or-bugfix-name
-    ```
-3. Commit your changes:
-    ```bash
-    git commit -m "Describe your changes here"
-    ```
-4. Push to the branch:
-    ```bash
-    git push origin feature-or-bugfix-name
-    ```
-5. Open a pull request on GitHub.
+```
+backend/focusbuddy/   API, policy, consent checks, prompts, LLM client, storage
+frontend/             React UI
+desktop/              C# counter library
+tests/                pytest suite
+evaluations/          hand-written model answers used to test the output checks
+docs/                 API, architecture, prompts, study-to-code mapping
+research/             notes on the 2024 MayDay study and personas
+legacy/               the 2024 report and original scripts (not used by the app)
+```
 
-## License
+## Credits
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Contact
-
-If you have any questions or suggestions, feel free to contact me at [pavanc1609@gmail.com](mailto:pavanc1609@gmail.com).
-
----
-
-**Focus Enhancer** - Helping you stay focused and productive!
+MayDay (2024): Azarang Etemadi, Pavankumar Chandankar, Gururaj Shetty, University of Siegen.
