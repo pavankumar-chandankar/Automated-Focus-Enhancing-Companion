@@ -32,8 +32,8 @@ class StatusRequest(BaseModel):
 
 def create_app(settings: Settings | None = None, provider: LLMProvider | None = None) -> FastAPI:
     cfg = settings or Settings.from_env()
-    app = FastAPI(title="Focus Buddy", version="0.3.0",
-                  description="Consent-based focus assistant prototype with an optional LLM.")
+    app = FastAPI(title="Oplyra", version="0.3.0",
+                  description="Oplyra research prototype: consent-based focus assistant with an optional LLM.")
     app.state.settings = cfg
     app.state.repo = Repository(cfg.db_path, cfg.retention_days)
     app.state.provider = provider or provider_from_settings(cfg)

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "focusbuddy"
 version = "0.3.0"
-description = "Consent-based focus assistant prototype with an optional LLM"
+description = "Oplyra local-first productivity companion research prototype"
 requires-python = ">=3.10"
 dependencies = ["fastapi>=0.110,<1", "uvicorn>=0.27,<1", "pydantic>=2.5,<3", "httpx>=0.26,<1"]
 

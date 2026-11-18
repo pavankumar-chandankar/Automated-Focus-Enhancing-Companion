@@ -1,10 +1,22 @@
-# Focus Buddy
+# Oplyra
 
-A small assistant that helps you get back to work after an interruption. It suggests a next step, says why, and you can always say no.
+**Work intelligence, reimagined.** Oplyra is the working brand for an open-source, local-first desktop productivity companion. Our longer-term ambition is a separate, permissioned team workflow intelligence product. **The team platform is a proposal, not implemented software.**
+
+This repository began as **Focus Buddy**, a research-driven assistant that helps people return to work after an interruption. It suggests a next step, explains why, and always allows dismissal.
 
 It started in 2024 as **MayDay**, an HCI course project at the University of Siegen by Azarang Etemadi, Pavankumar Chandankar and Gururaj Shetty. We interviewed people about interruptions at work, built personas and wireframes, and ran an enactment session. The 18-page report is in [`legacy/`](legacy/Autonomous_System_AI_Work_Companion.pdf).
 
 The first code from 2024 was a set of separate scripts, including a keystroke logger. In 2026 I rebuilt it as a proper app: a FastAPI backend, a React UI and an optional LLM, without the logging.
+
+## Product direction
+
+- **Oplyra Desktop (in development):** User-controlled focus sessions, task checkpoints, interruption recovery and optional AI coaching.
+- **Oplyra Teams (planned):** Authorized team-level workflow metrics, quality and capacity insights. No individual AI performance ratings or covert surveillance.
+- **Oplyra Intelligence (planned):** Evidence-based workflow improvement suggestions with human review.
+
+Our [product plan](docs/oplyra_product_plan.md), [technical architecture](docs/oplyra_architecture.md), [data-use boundaries](docs/oplyra_data_principles.md), and [release gates](docs/oplyra_release_gates.md) distinguish today's implementation from future plans. Brand clearance, contributor rights, and applicable employment/privacy-law review remain open prerequisites for commercialization.
+
+**Compatibility:** the Python package is still named `focusbuddy`, API paths remain `/v1/...`, and `FOCUSBUDDY_*` environment variables are supported. Do not rename them until a versioned migration is tested.
 
 ## What the 2024 study found
 

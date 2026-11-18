@@ -137,8 +137,8 @@ export default function App() {
         <div className="brand">
           <div className="logo">F·B</div>
           <div>
-            <b>Focus Buddy</b>
-            <small>PROTOTYPE</small>
+            <b>Oplyra</b>
+            <small>LOCAL RESEARCH PROTOTYPE</small>
           </div>
         </div>
         <nav>

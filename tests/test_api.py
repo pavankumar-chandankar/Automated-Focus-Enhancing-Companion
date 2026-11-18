@@ -11,6 +11,7 @@ def start(client,payload):
 
 def test_health_and_capabilities(client):
     assert client.get('/health').json()['ok']
+    assert client.get('/openapi.json').json()['info']['title'] == 'Oplyra'
     caps=client.get('/v1/capabilities').json()
     assert caps['provider_mode']=='mock'
     assert caps['external_text_possible'] is False
