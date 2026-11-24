@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::policy::{Feedback, PolicyState, SupportMode};
 
 const MAX_GOAL: usize = 160;
 const MAX_STEP: usize = 240;
@@ -20,6 +21,7 @@ pub struct SessionModel {
     pub sessions_completed: u64,
     pub last_completed_ms: Option<u64>,
     pub quiet_mode: bool,
+    pub policy: PolicyState,
 }
 
 impl Default for SessionModel {
@@ -27,7 +29,7 @@ impl Default for SessionModel {
         Self {
             schema_version: 1, phase: Phase::Idle, goal: String::new(), next_step: String::new(),
             accumulated_ms: 0, running_since_ms: None, sessions_completed: 0,
-            last_completed_ms: None, quiet_mode: true,
+            last_completed_ms: None, quiet_mode: true, policy: PolicyState::default(),
         }
     }
 }
@@ -42,6 +44,9 @@ pub struct SessionSnapshot {
     pub sessions_completed: u64,
     pub last_completed_ms: Option<u64>,
     pub quiet_mode: bool,
+    pub support_mode: SupportMode,
+    pub preference_weight: i8,
+    pub pending_offer_id: Option<u32>,
 }
 
 fn valid_text(text: &str, name: &str, limit: usize) -> Result<String, String> {
@@ -56,6 +61,7 @@ fn valid_text(text: &str, name: &str, limit: usize) -> Result<String, String> {
 
 impl SessionModel {
     pub fn validate(&self) -> Result<(), String> {
+        self.policy.validate()?;
         if self.schema_version != 1 { return Err("Unknown local data version; refusing to overwrite it".into()); }
         if self.phase == Phase::Running && self.running_since_ms.is_none() {
             return Err("Active session has no start timestamp".into());
@@ -82,7 +88,10 @@ impl SessionModel {
             schema_version: self.schema_version, phase: self.phase,
             goal: self.goal.clone(), next_step: self.next_step.clone(), elapsed_ms: self.elapsed(now_ms),
             sessions_completed: self.sessions_completed, last_completed_ms: self.last_completed_ms,
-            quiet_mode: self.quiet_mode,
+            quiet_mode: self.policy.mode == SupportMode::Quiet,
+            support_mode: self.policy.mode,
+            preference_weight: self.policy.weight(),
+            pending_offer_id: self.policy.pending_id(),
         }
     }
 
@@ -90,6 +99,7 @@ impl SessionModel {
         if self.phase != Phase::Idle { return Err("Finish your current session before starting another".into()); }
         let goal = valid_text(goal, "Goal", MAX_GOAL)?;
         let next_step = valid_text(next_step, "Next step", MAX_STEP)?;
+        self.policy.clear_pending();
         self.goal = goal;
         self.next_step = next_step;
         self.accumulated_ms = 0;
@@ -100,6 +110,7 @@ impl SessionModel {
 
     pub fn pause(&mut self, now_ms: u64) -> Result<(), String> {
         if self.phase != Phase::Running { return Err("Session is not running".into()); }
+        self.policy.clear_pending();
         self.accumulated_ms = self.elapsed(now_ms);
         self.running_since_ms = None;
         self.phase = Phase::Paused;
@@ -108,13 +119,31 @@ impl SessionModel {
 
     pub fn resume(&mut self, now_ms: u64) -> Result<(), String> {
         if self.phase != Phase::Paused { return Err("Session is not paused".into()); }
+        self.policy.clear_pending();
         self.running_since_ms = Some(now_ms);
         self.phase = Phase::Running;
         Ok(())
     }
 
+    pub fn resume_with_assistance(&mut self, now_ms: u64) -> Result<(), String> {
+        self.resume(now_ms)?;
+        self.policy.on_return(!self.next_step.trim().is_empty(), now_ms);
+        Ok(())
+    }
+
+    pub fn set_support_mode(&mut self, mode: SupportMode) {
+        self.quiet_mode = mode == SupportMode::Quiet;
+        self.policy.set_mode(mode);
+    }
+
+    pub fn record_feedback(&mut self, id: u32, response: Feedback) -> Result<(), String> {
+        if self.phase != Phase::Running { return Err("No active return cue".into()); }
+        self.policy.feedback(id, response)
+    }
+
     pub fn finish(&mut self, now_ms: u64) -> Result<(), String> {
         if self.phase == Phase::Idle { return Err("There is no active session".into()); }
+        self.policy.clear_pending();
         let elapsed = self.elapsed(now_ms);
         self.last_completed_ms = Some(elapsed);
         self.accumulated_ms = 0;
@@ -127,6 +156,7 @@ impl SessionModel {
     pub fn checkpoint(&mut self, text: &str) -> Result<(), String> {
         if self.phase == Phase::Idle { return Err("Start a session before saving a checkpoint".into()); }
         self.next_step = valid_text(text, "Next step", MAX_STEP)?;
+        self.policy.clear_pending();
         Ok(())
     }
 }
@@ -187,6 +217,46 @@ mod tests {
         restored.validate().unwrap();
         assert_eq!(restored.phase, Phase::Running);
         assert_eq!(restored.elapsed(25_000), 5_000);
+    }
+
+    #[test]
+    fn legacy_session_without_policy_defaults_to_quiet() {
+        let json = r#"{"schema_version":1,"phase":"paused","goal":"Read","next_step":"Page 3","accumulated_ms":12000,"quiet_mode":false}"#;
+        let mut restored: SessionModel = serde_json::from_str(json).unwrap();
+        restored.validate().unwrap();
+        assert_eq!(restored.snapshot(500).support_mode, SupportMode::Quiet);
+        restored.resume_with_assistance(500).unwrap();
+        assert_eq!(restored.snapshot(500).pending_offer_id, None);
+        assert_eq!(restored.goal, "Read");
+    }
+
+    #[test]
+    fn only_explicit_assisted_resume_offers_and_lifecycle_invalidates() {
+        let mut model = SessionModel::default();
+        model.set_support_mode(SupportMode::Balanced);
+        model.start("Task", "Step", 0).unwrap();
+        model.pause(10).unwrap();
+        model.resume(20).unwrap();
+        assert_eq!(model.policy.pending_id(), None);
+        model.pause(30).unwrap();
+        model.resume_with_assistance(40).unwrap();
+        let id = model.policy.pending_id().unwrap();
+        model.pause(50).unwrap();
+        assert!(model.record_feedback(id, Feedback::Useful).is_err());
+        assert_eq!(model.policy.pending_id(), None);
+    }
+
+    #[test]
+    fn checkpoint_update_invalidates_previous_offer() {
+        let mut model = SessionModel::default();
+        model.set_support_mode(SupportMode::Balanced);
+        model.start("Task", "Step", 0).unwrap();
+        model.pause(10).unwrap();
+        model.resume_with_assistance(20).unwrap();
+        let id = model.policy.pending_id().unwrap();
+        model.checkpoint("New step").unwrap();
+        assert!(model.record_feedback(id, Feedback::Useful).is_err());
+        assert_eq!(model.next_step, "New step");
     }
 
     #[test]

@@ -1,4 +1,6 @@
 mod model;
+mod policy;
+use policy::{Feedback, SupportMode};
 
 use std::{fs, path::PathBuf, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
 use model::{SessionModel, SessionSnapshot};
@@ -15,13 +17,15 @@ fn clock_ms() -> u64 {
 
 impl SessionStore {
     fn read(path: PathBuf) -> Result<Self, String> {
-        let model = if path.exists() {
+        let mut model = if path.exists() {
             let bytes = fs::read(&path).map_err(|e| format!("Cannot read session file: {e}"))?;
             serde_json::from_slice::<SessionModel>(&bytes).map_err(|e| format!("Cannot parse session file: {e}"))?
         } else {
             SessionModel::default()
         };
         model.validate()?;
+        // Never resurrect an old offer after process restart.
+        model.policy.clear_pending();
         Ok(Self { path, state: Mutex::new(model) })
     }
 
@@ -80,7 +84,27 @@ fn save_next_step(store: State<'_, SessionStore>, next_step: String) -> Result<S
 
 #[tauri::command]
 fn set_quiet_mode(store: State<'_, SessionStore>, enabled: bool) -> Result<SessionSnapshot, String> {
-    store.mutate(|session, _now| { session.quiet_mode = enabled; Ok(()) })
+    store.mutate(|session, _now| { session.set_support_mode(if enabled { SupportMode::Quiet } else { SupportMode::Balanced }); Ok(()) })
+}
+
+#[tauri::command]
+fn resume_with_assistance(store: State<'_, SessionStore>) -> Result<SessionSnapshot, String> {
+    store.mutate(|session, now| session.resume_with_assistance(now))
+}
+
+#[tauri::command]
+fn set_support_mode(store: State<'_, SessionStore>, mode: SupportMode) -> Result<SessionSnapshot, String> {
+    store.mutate(|session, _now| { session.set_support_mode(mode); Ok(()) })
+}
+
+#[tauri::command]
+fn record_cue_feedback(store: State<'_, SessionStore>, offer_id: u32, response: Feedback) -> Result<SessionSnapshot, String> {
+    store.mutate(|session, _now| session.record_feedback(offer_id, response))
+}
+
+#[tauri::command]
+fn reset_cue_preference(store: State<'_, SessionStore>) -> Result<SessionSnapshot, String> {
+    store.mutate(|session, _now| { session.policy.reset_preference(); Ok(()) })
 }
 
 // The bin is a separate 112x112 logical-pixel surface, shown *only* while
@@ -177,7 +201,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot, start_session, pause_session, resume_session, finish_session,
-            save_next_step, set_quiet_mode, begin_companion_drag,
+            save_next_step, set_quiet_mode, resume_with_assistance, set_support_mode,
+            record_cue_feedback, reset_cue_preference, begin_companion_drag,
             finish_companion_drag, cancel_companion_drag
         ])
         .run(tauri::generate_context!())

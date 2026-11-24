@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { companion, type Phase, type SessionSnapshot } from "./native";
+import { companion, type Phase, type SessionSnapshot, type SupportMode, type CueFeedback } from "./native";
 
 // Logical pixels. The visible native surface shrinks to the character when closed;
 // it is never a conventional full-window application.
@@ -108,6 +108,11 @@ function CompanionApp() {
   const [nextStep, setNextStep] = useState("");
   const [draftNextStep, setDraftNextStep] = useState("");
   const [showCue, setShowCue] = useState(false);
+  const [offerId, setOfferId] = useState<number | null>(null);
+  const expandedRef = useRef(false);
+  const visibilityEpoch = useRef(0);
+  const actionEpoch = useRef(0);
+  const actionRunning = useRef(false);
   const [error, setError] = useState("");
   const runningRequest = useRef(false);
 
@@ -125,16 +130,24 @@ function CompanionApp() {
   }, []);
 
   useEffect(() => {
-    if (!ready || !current) return;
-    // The native clock is authoritative. Polling only refreshes the tiny display.
-    const interval = window.setInterval(() => {
-      if (runningRequest.current) return;
+    // No periodic native clock reads in compact mode or during a pause.
+    // Refresh immediately when the user opens the running session.
+    if (!ready || !expanded || current?.phase !== "running") return;
+    let active = true;
+    const tick = () => {
+      if (document.hidden || runningRequest.current || actionRunning.current) return;
+      const epoch = actionEpoch.current;
       runningRequest.current = true;
-      void companion.snapshot().then(setCurrent).catch((e: unknown) => setError(String(e)))
-        .finally(() => { runningRequest.current = false; });
-    }, 1000);
-    return () => window.clearInterval(interval);
-  }, [ready, current?.phase]);
+      void companion.snapshot().then((data) => {
+        if (active && epoch === actionEpoch.current && !actionRunning.current) setCurrent(data);
+      }).catch((e: unknown) => {
+        if (active && epoch === actionEpoch.current) setError(String(e));
+      }).finally(() => { runningRequest.current = false; });
+    };
+    tick();
+    const interval = window.setInterval(tick, 1000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [ready, expanded, current?.phase]);
 
   async function toggleDetails(open: boolean) {
     if (resizing) return;
@@ -143,8 +156,10 @@ function CompanionApp() {
     try {
       // The hit-test region grows only when the user explicitly opens controls.
       await appWindow.setSize(open ? OPEN : COMPACT);
+      expandedRef.current = open;
+      visibilityEpoch.current += 1;
       setExpanded(open);
-      if (!open) setShowCue(false);
+      if (!open) { setShowCue(false); setOfferId(null); }
     } catch (failure) { setError(`Could not resize companion: ${String(failure)}`); }
     finally { setResizing(false); }
   }
@@ -181,8 +196,11 @@ function CompanionApp() {
     try {
       if (expanded) {
         await appWindow.setSize(COMPACT);
+        expandedRef.current = false;
+        visibilityEpoch.current += 1;
         setExpanded(false);
         setShowCue(false);
+        setOfferId(null);
       }
       await gesture.geometryPromise;
       if (!gesture.base) return; // No native coordinates: do not open an unusable bin.
@@ -272,17 +290,31 @@ function CompanionApp() {
     })();
   }
 
-  async function act(action: () => Promise<SessionSnapshot>) {
-    if (busy) return;
+  async function act(
+    action: () => Promise<SessionSnapshot>,
+    options: { offer?: boolean; preserveDraft?: boolean } = {},
+  ) {
+    if (actionRunning.current) return;
+    actionRunning.current = true;
+    actionEpoch.current += 1;
+    const visibility = visibilityEpoch.current;
     setBusy(true);
     setError("");
     try {
       const data = await action();
       setCurrent(data);
-      setDraftNextStep(data.next_step);
+      if (!options.preserveDraft) setDraftNextStep(data.next_step);
       setShowCue(false);
+      // Only the user's explicit Resume action can surface a policy offer.
+      // Never resurrect a cue from polling, restart, or a collapsed bubble.
+      setOfferId(options.offer && expandedRef.current && visibility === visibilityEpoch.current
+        ? data.pending_offer_id : null);
     } catch (failure) { setError(String(failure)); }
-    finally { setBusy(false); }
+    finally { actionRunning.current = false; setBusy(false); }
+  }
+
+  function respondToOffer(response: CueFeedback) {
+    if (offerId !== null) void act(() => companion.feedback(offerId, response), { preserveDraft: true });
   }
 
   useEffect(() => {
@@ -295,6 +327,7 @@ function CompanionApp() {
 
   const phase = current?.phase ?? "idle";
   const inSession = phase !== "idle";
+  const hasOffer = current?.phase === "running" && offerId !== null && offerId === current.pending_offer_id && current.support_mode !== "quiet";
   const phaseName = phase === "running" ? "Focusing" : phase === "paused" ? "On a break" : "Here when you need me";
 
   return (
@@ -349,17 +382,46 @@ function CompanionApp() {
               <div className="session-meta"><span className={`session-pill status-${phase}`}>{phase === "running" ? "In progress" : "Paused"}</span><span className="elapsed">{formatTime(current.elapsed_ms)}</span></div>
               <h2 className="current-goal">{current.goal}</h2>
               <button type="button" className="cue-toggle" onClick={() => setShowCue(!showCue)} aria-expanded={showCue}>{showCue ? "Hide next-step cue" : "Remind me of my next step"}</button>
-              {showCue && <p className="cue-card">{current.next_step}</p>}
+              {showCue && !hasOffer && <p className="cue-card">{current.next_step}</p>}
+              {hasOffer && (
+                <section className="return-offer" aria-label="Optional return cue">
+                  <span className="offer-heading">Your saved next step</span>
+                  <p>{current.next_step}</p>
+                  <div className="offer-actions">
+                    <button type="button" disabled={busy} onClick={() => respondToOffer("useful")}>Useful</button>
+                    <button type="button" disabled={busy} onClick={() => respondToOffer("not_useful")}>Not useful</button>
+                    <button type="button" disabled={busy} onClick={() => respondToOffer("dismiss")}>Dismiss</button>
+                  </div>
+                  <small>Only shown after you resume. Feedback changes future cues locally.</small>
+                </section>
+              )}
               <label htmlFor="checkpoint">Save your next step</label>
               <textarea id="checkpoint" maxLength={240} rows={2} value={draftNextStep} onChange={(event) => setDraftNextStep(event.target.value)} />
               <div className="action-row">
                 <button type="button" className="secondary-action" disabled={busy || !draftNextStep.trim() || draftNextStep.trim() === current.next_step} onClick={() => void act(() => companion.saveNextStep(draftNextStep))}>Save step</button>
-                <button type="button" className="primary-action" disabled={busy} onClick={() => void act(phase === "running" ? companion.pause : companion.resume)}>{phase === "running" ? "Pause" : "Resume"}</button>
+                <button type="button" className="primary-action" disabled={busy} onClick={() => phase === "running" ? void act(companion.pause) : void act(companion.resumeWithAssistance, { offer: true })}>{phase === "running" ? "Pause" : "Resume"}</button>
               </div>
               <button type="button" className="finish-button" disabled={busy} onClick={() => void act(companion.finish)}>Finish session</button>
             </div>
           )}
-          <div className="bubble-footer">You choose when Oplyra appears. No background sensing or automatic prompts.</div>
+          {ready && current && (
+            <details className="support-settings">
+              <summary>Assistance · {current.support_mode === "quiet" ? "Quiet" : current.support_mode === "balanced" ? "Balanced" : "Supportive"}</summary>
+              <label htmlFor="support-mode">Support intensity</label>
+              <select id="support-mode" disabled={busy} value={current.support_mode}
+                onChange={(event) => {
+                  const mode = event.target.value as SupportMode;
+                  void act(() => companion.setSupportMode(mode), { preserveDraft: true });
+                }}>
+                <option value="quiet">Quiet — manual cues only</option>
+                <option value="balanced">Balanced — optional return cue</option>
+                <option value="supportive">Supportive — more willing to offer</option>
+              </select>
+              <p className="quiet-note">Offers only when you press Resume, with at least two minutes between offers. No activity sensing.</p>
+              <button type="button" className="cue-toggle" disabled={busy} onClick={() => void act(companion.resetPreference, { preserveDraft: true })}>Reset cue preferences</button>
+            </details>
+          )}
+          <div className="bubble-footer">You choose when Oplyra appears. Offline · no background sensing or external AI.</div>
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
       )}

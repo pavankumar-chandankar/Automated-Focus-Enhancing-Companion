@@ -11,8 +11,12 @@ on:
 permissions:
   contents: read
 jobs:
-  windows:
-    runs-on: windows-latest
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -31,5 +35,6 @@ jobs:
       - name: Test native session engine
         run: cargo test --manifest-path companion/src-tauri/Cargo.toml
       - name: Compile desktop application and installer (unsigned)
+        if: runner.os == 'Windows'
         working-directory: companion
         run: npm run tauri build
