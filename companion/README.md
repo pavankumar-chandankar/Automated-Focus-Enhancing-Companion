@@ -1,25 +1,31 @@
-# Oplyra desktop — floating companion alpha
+# Oplyra desktop — companionship preview (v0.6)
 
-Oplyra is an **optional, local-first floating focus companion**, not a fullscreen dashboard, conventional window or autonomous AI pet. The user explicitly opens, moves, and hides it. The desktop surface is transparent and borderless; the user clicks the character to reveal a compact, on-demand task bubble.
+You do the work. Oplyra keeps you company.
 
-**Current slice:** original 2D animated character, a native macOS/Windows Tauri overlay, menu-bar Show / Hide / Quit, user-controlled Start / Pause / Resume / Finish, a manual next-step cue and persisted local session checkpoints. The Rust model is unchanged from v0.1, so existing `session.json` remains compatible.
+Oplyra is an optional floating, borderless character with a small text conversation bubble. Click to talk; click and move to drag; drop on the bin to hide; restore via the menu bar. No normal window, timer dashboard, goal form or assistance settings are presented.
 
-## macOS M1 development
+## Try it
 
-```bash
-cd companion
-npm install
+- "Let's study together" starts a local focus session.
+- "I need to work on my paper" starts with an explicitly declared goal.
+- "I'm getting distracted" offers a brief encouragement.
+- "I need a break", "I'm back", "I'm done" manage the session.
+- "Just sit with me" or "Don't interrupt me" selects quiet support.
+- "What can you do?" explains supported phrases.
+
+The dialogue is intentionally limited English phrase recognition, not an LLM or a general chatbot. It does not answer subject questions, infer feelings, monitor activities, or pretend to have consciousness. Character states express available, attentive, working, resting, encouraging and celebrating behaviour. The existing native session store and adaptive policy remain, but v0.6 does not trigger return offers or collect cue feedback. A manual resume uses the non-intervening native path. Conversation text/replies are ephemeral; only an explicitly declared session goal and existing session data are persisted. No new dependencies, screen/microphone permission, network calls or periodic session polling. Existing app identifier remains unchanged. Voice and session-authorized context sensing are future work.
+
+## Development
+
+From companion:
+```sh
+npm install --no-audit --no-fund
 npm run build
+npm run test:dialogue
 cargo test --manifest-path src-tauri/Cargo.toml
 npm run tauri dev
 ```
 
-Controls: click the character to open/close its small control bubble. To move it, press and start moving the pointer at least 4 pixels—there is **no long-press delay or separate drag handle**. While dragging, a small bin appears near the bottom center; drop the character on the bin to hide it **without deleting work**. Restore with **Show Oplyra** from the macOS menu-bar icon. Press Escape to collapse the bubble; Tab then Enter/Space also opens it. Quit from the menu-bar icon. The overlay runs only when you launch the app; no login auto-start is installed.
+## Acceptance gates
 
-## Privacy and explicit limitations
-
-No activity, application, window-title, keyboard, mouse, camera or microphone monitoring is implemented. A deterministic local return-cue policy runs only on the user's explicit Resume action. No model call, third-party account, network sync or backend connection runs. The existing focus timer counts elapsed wall time, including system sleep, until manually paused. The user can always request a checkpoint cue manually. See ADAPTIVE_V05.md for the opt-in modes, feedback rules and validation. Transparent portions of a Tauri overlay can still intercept pointer events **inside the small native hit region**; the app shrinks this region when the controls are closed.
-
-This is an **unreleased prototype**, not a production or child-facing application. It has not been tested on multiple monitor configurations or distributed as a signed/notarised installer. The project identifier and Oplyra brand are provisional. See `OVERLAY_V02.md` for scope and testing notes.
-
-The original FastAPI/React and C# prototypes remain separate; nothing in this companion transmits data to team dashboards or workplace analytics.
+Test launch, click open/close, instant drag, drop-to-hide and restore on the M1. Verify start/break/return/finish and a restored v0.5 session. Verify unknown input does not execute a session action; closing the bubble clears dialogue. Keep network disconnected after dependency installation and confirm all functions work. Measure the packaged app (including WebKit subprocesses); low energy/RAM is a goal, not a verified result. Screen-aware placement, optional microphone/voice, consent-scoped sensing, adaptive encouragement, delete/export and signed distribution are unfinished. Adults-only formative testing.

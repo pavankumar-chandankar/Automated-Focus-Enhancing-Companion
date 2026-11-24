@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { companion, type Phase, type SessionSnapshot, type SupportMode, type CueFeedback } from "./native";
+import { companion, type Phase, type SessionSnapshot } from "./native";
+import { planMessage, restingBehaviour, type Behaviour } from "./dialogue";
 
 // Logical pixels. The visible native surface shrinks to the character when closed;
 // it is never a conventional full-window application.
 const COMPACT = new LogicalSize(192, 210);
-const OPEN = new LogicalSize(342, 594);
+const OPEN = new LogicalSize(342, 400);
 const appWindow = getCurrentWindow();
 // A click remains a click; moving the pointer at least 4px while pressed
 // begins dragging immediately, with no long-press timer.
@@ -42,19 +43,9 @@ function DropTarget() {
 }
 
 
-function formatTime(milliseconds: number): string {
-  const seconds = Math.floor(Math.max(0, milliseconds) / 1000);
-  const hours = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  const secs = seconds % 60;
-  return hours
-    ? `${String(hours).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
-    : `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-}
-
-function Character({ phase }: { phase: Phase }) {
+function Character({ phase, behaviour }: { phase: Phase; behaviour: Behaviour }) {
   return (
-    <svg className={`character-art phase-${phase}`} viewBox="0 0 204 180" aria-hidden="true">
+    <svg className={`character-art phase-${phase} behaviour-${behaviour}`} viewBox="0 0 204 180" aria-hidden="true">
       <defs>
         <linearGradient id="oplyra-body" x1="0" y1="0" x2="1" y2="1">
           <stop offset="0" stopColor="#E2DBFF" />
@@ -78,7 +69,7 @@ function Character({ phase }: { phase: Phase }) {
         <path d="M60 86 C63 58 82 49 107 50 C91 53 73 68 69 91Z" fill="url(#oplyra-shine)" />
         <ellipse cx="73" cy="110" rx="13" ry="7" fill="#FFB4C9" opacity=".6" />
         <ellipse cx="135" cy="110" rx="13" ry="7" fill="#FFB4C9" opacity=".6" />
-        {phase === "paused" ? (
+        {behaviour === "resting" ? (
           <g fill="none" stroke="#3C365A" strokeLinecap="round" strokeWidth="4.5">
             <path d="M75 94 Q85 88 95 94" /><path d="M117 94 Q127 88 137 94" />
           </g>
@@ -88,7 +79,8 @@ function Character({ phase }: { phase: Phase }) {
           </g>
         )}
         <path d={phase === "running" ? "M96 117 Q104 124 112 117" : "M99 117 Q104 121 109 117"} fill="none" stroke="#544B77" strokeWidth="3.3" strokeLinecap="round" />
-        {phase === "running" && <circle className="focus-spark" cx="160" cy="53" r="4" fill="#FFE0A7" />}
+        {behaviour === "working" && <g className="work-book" stroke="#7968ba" strokeWidth="1.7" strokeLinejoin="round"><path d="M73 130 Q89 124 103 134 Q117 124 133 130 L132 149 Q117 145 103 154 Q89 145 74 149Z" fill="#f6f0ff"/><path d="M103 134V154" fill="none"/></g>}
+        {behaviour === "celebrating" && <g className="celebrate-spark" fill="#e5ab53"><path d="M37 44 l3 8 8 3 -8 3 -3 8 -3 -8 -8 -3 8 -3Z"/><path d="M170 28 l3 8 8 3 -8 3 -3 8 -3 -8 -8 -3 8 -3Z"/></g>}
       </g>
     </svg>
   );
@@ -104,50 +96,23 @@ function CompanionApp() {
   const pendingPosition = useRef<PhysicalPosition | null>(null);
   const movingPosition = useRef(false);
   const [busy, setBusy] = useState(false);
-  const [goal, setGoal] = useState("");
-  const [nextStep, setNextStep] = useState("");
-  const [draftNextStep, setDraftNextStep] = useState("");
-  const [showCue, setShowCue] = useState(false);
-  const [offerId, setOfferId] = useState<number | null>(null);
+  const [message, setMessage] = useState("");
+  const [reply, setReply] = useState("");
+  const [reaction, setReaction] = useState<Behaviour | null>(null);
   const expandedRef = useRef(false);
   const visibilityEpoch = useRef(0);
-  const actionEpoch = useRef(0);
   const actionRunning = useRef(false);
   const [error, setError] = useState("");
-  const runningRequest = useRef(false);
 
   useEffect(() => {
     let active = true;
     void companion.snapshot().then((data) => {
       if (!active) return;
       setCurrent(data);
-      setGoal(data.goal);
-      setNextStep(data.next_step);
-      setDraftNextStep(data.next_step);
       setReady(true);
     }).catch((e: unknown) => { if (active) { setError(String(e)); setReady(true); } });
     return () => { active = false; };
   }, []);
-
-  useEffect(() => {
-    // No periodic native clock reads in compact mode or during a pause.
-    // Refresh immediately when the user opens the running session.
-    if (!ready || !expanded || current?.phase !== "running") return;
-    let active = true;
-    const tick = () => {
-      if (document.hidden || runningRequest.current || actionRunning.current) return;
-      const epoch = actionEpoch.current;
-      runningRequest.current = true;
-      void companion.snapshot().then((data) => {
-        if (active && epoch === actionEpoch.current && !actionRunning.current) setCurrent(data);
-      }).catch((e: unknown) => {
-        if (active && epoch === actionEpoch.current) setError(String(e));
-      }).finally(() => { runningRequest.current = false; });
-    };
-    tick();
-    const interval = window.setInterval(tick, 1000);
-    return () => { active = false; window.clearInterval(interval); };
-  }, [ready, expanded, current?.phase]);
 
   async function toggleDetails(open: boolean) {
     if (resizing) return;
@@ -159,7 +124,7 @@ function CompanionApp() {
       expandedRef.current = open;
       visibilityEpoch.current += 1;
       setExpanded(open);
-      if (!open) { setShowCue(false); setOfferId(null); }
+      if (!open) { setReply(""); setReaction(null); setMessage(""); }
     } catch (failure) { setError(`Could not resize companion: ${String(failure)}`); }
     finally { setResizing(false); }
   }
@@ -199,8 +164,9 @@ function CompanionApp() {
         expandedRef.current = false;
         visibilityEpoch.current += 1;
         setExpanded(false);
-        setShowCue(false);
-        setOfferId(null);
+        setReply("");
+        setReaction(null);
+        setMessage("");
       }
       await gesture.geometryPromise;
       if (!gesture.base) return; // No native coordinates: do not open an unusable bin.
@@ -290,31 +256,39 @@ function CompanionApp() {
     })();
   }
 
-  async function act(
-    action: () => Promise<SessionSnapshot>,
-    options: { offer?: boolean; preserveDraft?: boolean } = {},
-  ) {
-    if (actionRunning.current) return;
+  async function sendMessage() {
+    if (actionRunning.current || !current || !message.trim()) return;
+    const plan = planMessage(message, current.phase);
     actionRunning.current = true;
-    actionEpoch.current += 1;
     const visibility = visibilityEpoch.current;
     setBusy(true);
     setError("");
+    setMessage("");
     try {
-      const data = await action();
+      let data = current;
+      switch (plan.action) {
+        case "start": data = await companion.start(plan.goal ?? "Focus together", "Continue the chosen task"); break;
+        case "pause": data = await companion.pause(); break;
+        // The older automatic return-cue policy remains in Rust but isn't
+        // invoked here. Conversation is requested by the user, not a prompt.
+        case "resume": data = await companion.resume(); break;
+        case "finish": data = await companion.finish(); break;
+        case "quiet": data = await companion.setSupportMode("quiet"); break;
+        case "none": break;
+      }
       setCurrent(data);
-      if (!options.preserveDraft) setDraftNextStep(data.next_step);
-      setShowCue(false);
-      // Only the user's explicit Resume action can surface a policy offer.
-      // Never resurrect a cue from polling, restart, or a collapsed bubble.
-      setOfferId(options.offer && expandedRef.current && visibility === visibilityEpoch.current
-        ? data.pending_offer_id : null);
-    } catch (failure) { setError(String(failure)); }
-    finally { actionRunning.current = false; setBusy(false); }
-  }
-
-  function respondToOffer(response: CueFeedback) {
-    if (offerId !== null) void act(() => companion.feedback(offerId, response), { preserveDraft: true });
+      if (expandedRef.current && visibility === visibilityEpoch.current) {
+        setReply(plan.reply);
+        setReaction(plan.behaviour);
+      }
+    } catch (failure) {
+      setError(String(failure));
+      setReply("I couldn't complete that action. You can try again.");
+      setReaction(null);
+    } finally {
+      actionRunning.current = false;
+      setBusy(false);
+    }
   }
 
   useEffect(() => {
@@ -326,9 +300,8 @@ function CompanionApp() {
   }, [expanded, resizing]);
 
   const phase = current?.phase ?? "idle";
-  const inSession = phase !== "idle";
-  const hasOffer = current?.phase === "running" && offerId !== null && offerId === current.pending_offer_id && current.support_mode !== "quiet";
-  const phaseName = phase === "running" ? "Focusing" : phase === "paused" ? "On a break" : "Here when you need me";
+  const behaviour = reaction ?? (expanded ? "attentive" : restingBehaviour(phase));
+  const phaseName = phase === "running" ? "Working together" : phase === "paused" ? "On a break" : "Here with you";
 
   return (
     <main className={`overlay ${expanded ? "is-expanded" : "is-compact"} ${dragging ? "is-dragging" : ""}`}>
@@ -351,7 +324,7 @@ function CompanionApp() {
           aria-label={`${phaseName}. Click to ${expanded ? "close" : "open"} controls; click and drag to move; drop on the bottom-centre bin to hide.`}
           title="Click for controls · Drag immediately to move · Drop on bin to hide"
         >
-          <Character phase={phase} />
+          <Character phase={phase} behaviour={behaviour} />
         </button>
         <div className="character-status" role="status">
           <span className={`status-light status-${phase}`} />
@@ -360,68 +333,19 @@ function CompanionApp() {
       </div>
 
       {expanded && (
-        <section id="companion-controls" className="control-bubble" aria-label="Oplyra focus controls">
-          <div className="bubble-header">
-            <div><span className="eyebrow">OPLYRA · LOCAL FIRST</span><h1>{inSession ? "Keep your place." : "Begin gently."}</h1></div>
-            <button className="fold-button" type="button" onClick={() => void toggleDetails(false)} aria-label="Close controls">−</button>
-          </div>
-          {!ready && <p className="small-copy">Loading your local session…</p>}
-          {ready && !current && <p className="small-copy">Your saved session could not be loaded.</p>}
-          {ready && current && !inSession && (
-            <form className="session-form" onSubmit={(event) => { event.preventDefault(); void act(() => companion.start(goal, nextStep)); }}>
-              <label htmlFor="goal">What will you work on?</label>
-              <input id="goal" value={goal} maxLength={160} placeholder="Read chapter four" required onChange={(event) => setGoal(event.target.value)} />
-              <label htmlFor="next-step">Your very next step</label>
-              <textarea id="next-step" value={nextStep} maxLength={240} rows={2} placeholder="Open the chapter and take notes" required onChange={(event) => setNextStep(event.target.value)} />
-              <button className="primary-action" type="submit" disabled={busy || !goal.trim() || !nextStep.trim()}>Begin focus session</button>
-              {current.sessions_completed > 0 && <p className="quiet-note">{current.sessions_completed} sessions completed at your own pace.</p>}
-            </form>
-          )}
-          {ready && current && inSession && (
-            <div className="session-active">
-              <div className="session-meta"><span className={`session-pill status-${phase}`}>{phase === "running" ? "In progress" : "Paused"}</span><span className="elapsed">{formatTime(current.elapsed_ms)}</span></div>
-              <h2 className="current-goal">{current.goal}</h2>
-              <button type="button" className="cue-toggle" onClick={() => setShowCue(!showCue)} aria-expanded={showCue}>{showCue ? "Hide next-step cue" : "Remind me of my next step"}</button>
-              {showCue && !hasOffer && <p className="cue-card">{current.next_step}</p>}
-              {hasOffer && (
-                <section className="return-offer" aria-label="Optional return cue">
-                  <span className="offer-heading">Your saved next step</span>
-                  <p>{current.next_step}</p>
-                  <div className="offer-actions">
-                    <button type="button" disabled={busy} onClick={() => respondToOffer("useful")}>Useful</button>
-                    <button type="button" disabled={busy} onClick={() => respondToOffer("not_useful")}>Not useful</button>
-                    <button type="button" disabled={busy} onClick={() => respondToOffer("dismiss")}>Dismiss</button>
-                  </div>
-                  <small>Only shown after you resume. Feedback changes future cues locally.</small>
-                </section>
-              )}
-              <label htmlFor="checkpoint">Save your next step</label>
-              <textarea id="checkpoint" maxLength={240} rows={2} value={draftNextStep} onChange={(event) => setDraftNextStep(event.target.value)} />
-              <div className="action-row">
-                <button type="button" className="secondary-action" disabled={busy || !draftNextStep.trim() || draftNextStep.trim() === current.next_step} onClick={() => void act(() => companion.saveNextStep(draftNextStep))}>Save step</button>
-                <button type="button" className="primary-action" disabled={busy} onClick={() => phase === "running" ? void act(companion.pause) : void act(companion.resumeWithAssistance, { offer: true })}>{phase === "running" ? "Pause" : "Resume"}</button>
-              </div>
-              <button type="button" className="finish-button" disabled={busy} onClick={() => void act(companion.finish)}>Finish session</button>
-            </div>
-          )}
-          {ready && current && (
-            <details className="support-settings">
-              <summary>Assistance · {current.support_mode === "quiet" ? "Quiet" : current.support_mode === "balanced" ? "Balanced" : "Supportive"}</summary>
-              <label htmlFor="support-mode">Support intensity</label>
-              <select id="support-mode" disabled={busy} value={current.support_mode}
-                onChange={(event) => {
-                  const mode = event.target.value as SupportMode;
-                  void act(() => companion.setSupportMode(mode), { preserveDraft: true });
-                }}>
-                <option value="quiet">Quiet — manual cues only</option>
-                <option value="balanced">Balanced — optional return cue</option>
-                <option value="supportive">Supportive — more willing to offer</option>
-              </select>
-              <p className="quiet-note">Offers only when you press Resume, with at least two minutes between offers. No activity sensing.</p>
-              <button type="button" className="cue-toggle" disabled={busy} onClick={() => void act(companion.resetPreference, { preserveDraft: true })}>Reset cue preferences</button>
-            </details>
-          )}
-          <div className="bubble-footer">You choose when Oplyra appears. Offline · no background sensing or external AI.</div>
+        <section id="companion-controls" className="conversation-bubble" aria-label="Talk to Oplyra">
+          <p className="companion-reply" role="status" aria-live="polite">
+            {reply || (phase === "running" ? "How's it going?" : phase === "paused" ? "Ready when you are." : "Let's spend some time together.")}
+          </p>
+          <form className="conversation-form" onSubmit={(event) => { event.preventDefault(); void sendMessage(); }}>
+            <input aria-label="Type to Oplyra" value={message} maxLength={300}
+              placeholder="Say something…" disabled={!ready || !current || busy}
+              onChange={(event) => setMessage(event.target.value)} />
+            <button type="submit" aria-label="Send message" disabled={busy || !ready || !current || !message.trim()}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            </button>
+          </form>
+          <p className="conversation-note">Local preview · Try “let's focus” or “I need a break”.</p>
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
       )}

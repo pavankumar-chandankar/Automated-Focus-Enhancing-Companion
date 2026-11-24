@@ -32,6 +32,9 @@ jobs:
       - name: Type-check and build frontend
         working-directory: companion
         run: npm run build
+      - name: Test local dialogue and behaviour
+        working-directory: companion
+        run: npm run test:dialogue
       - name: Test native session engine
         run: cargo test --manifest-path companion/src-tauri/Cargo.toml
       - name: Compile desktop application and installer (unsigned)
