@@ -19,3 +19,9 @@ frontend/dist/
 results/
 *.egg-info/
 *.tsbuildinfo
+
+# Oplyra desktop build outputs
+companion/dist/
+companion/src-tauri/target/
+
+companion/src-tauri/gen/schemas/
