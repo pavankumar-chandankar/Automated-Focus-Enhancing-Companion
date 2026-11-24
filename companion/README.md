@@ -18,7 +18,7 @@ Controls: click the character to open/close its small control bubble. To move it
 
 ## Privacy and explicit limitations
 
-No activity, application, window-title, keyboard, mouse, camera or microphone monitoring is implemented. No automatic intervention policy, model call, third-party account, network sync or backend connection runs. The existing focus timer counts elapsed wall time, including system sleep, until manually paused. The user requests the checkpoint cue. Transparent portions of a Tauri overlay can still intercept pointer events **inside the small native hit region**; the app shrinks this region when the controls are closed.
+No activity, application, window-title, keyboard, mouse, camera or microphone monitoring is implemented. A deterministic local return-cue policy runs only on the user's explicit Resume action. No model call, third-party account, network sync or backend connection runs. The existing focus timer counts elapsed wall time, including system sleep, until manually paused. The user can always request a checkpoint cue manually. See ADAPTIVE_V05.md for the opt-in modes, feedback rules and validation. Transparent portions of a Tauri overlay can still intercept pointer events **inside the small native hit region**; the app shrinks this region when the controls are closed.
 
 This is an **unreleased prototype**, not a production or child-facing application. It has not been tested on multiple monitor configurations or distributed as a signed/notarised installer. The project identifier and Oplyra brand are provisional. See `OVERLAY_V02.md` for scope and testing notes.
 
