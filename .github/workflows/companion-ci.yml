@@ -1,0 +1,35 @@
+name: Desktop companion checks
+on:
+  push:
+    paths:
+      - "companion/**"
+      - ".github/workflows/companion-ci.yml"
+  pull_request:
+    paths:
+      - "companion/**"
+      - ".github/workflows/companion-ci.yml"
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: companion/src-tauri
+      - name: Install frontend dependencies
+        working-directory: companion
+        run: npm install --no-audit --no-fund
+      - name: Type-check and build frontend
+        working-directory: companion
+        run: npm run build
+      - name: Test native session engine
+        run: cargo test --manifest-path companion/src-tauri/Cargo.toml
+      - name: Compile desktop application and installer (unsigned)
+        working-directory: companion
+        run: npm run tauri build
