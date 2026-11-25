@@ -111,6 +111,7 @@ function CompanionApp() {
   const pendingAction = useRef<PendingAction | null>(null);
   const [latency, setLatency] = useState<number | null>(null);
   const [activeModel, setActiveModel] = useState<string | null>(null);
+  const [aiNotice, setAiNotice] = useState("");
   const [reaction, setReaction] = useState<Behaviour | null>(null);
   const expandedRef = useRef(false);
   const visibilityEpoch = useRef(0);
@@ -375,6 +376,7 @@ function CompanionApp() {
         try {
           const generated = await companion.localReply(userMessage, history.current);
           if (expandedRef.current && visibility === visibilityEpoch.current) {
+            setAiNotice("");
             setSource(generated.provider);
             setActiveModel(generated.model);
             setLatency(generated.latency_ms);
@@ -407,6 +409,7 @@ function CompanionApp() {
             setReply(plan.reply);
             setReaction(plan.behaviour);
             setSource("fallback");
+            setAiNotice(String(failure).includes("Groq rate limit") ? "Groq limit reached · try later" : String(failure).includes("Groq API key missing") ? "Groq API key missing" : "AI unavailable · basic response");
             history.current = rememberTurn(history.current, userMessage, plan.reply);
           }
         }
@@ -505,7 +508,7 @@ function CompanionApp() {
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
             </button>
           </form>
-          <p className="conversation-note">{pendingAction.current ? "Reply yes or no · no change yet" : source === "local" || source === "deepseek" ? `${source === "deepseek" ? "DeepSeek · online" : activeModel ?? "Local AI"} · ${((latency ?? 0) / 1000).toFixed(1)} s` : source === "fallback" ? "AI unavailable · basic response" : provider === "deepseek" ? "DeepSeek online · chat and session context sent" : provider === "local" ? "On-device · Talk to Oplyra." : "AI provider loading…"} </p>
+          <p className="conversation-note">{pendingAction.current ? "Reply yes or no · no change yet" : source === "local" || source === "deepseek" || source === "groq" ? `${source === "groq" ? "GPT-OSS-120B · Groq" : source === "deepseek" ? "DeepSeek · online" : activeModel ?? "Local AI"} · ${((latency ?? 0) / 1000).toFixed(1)} s` : source === "fallback" ? aiNotice || "AI unavailable · basic response" : provider === "groq" ? "Groq online · chat and session context sent" : provider === "deepseek" ? "DeepSeek online · chat and session context sent" : provider === "local" ? "On-device · Talk to Oplyra." : "AI provider loading…"} </p>
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
       )}

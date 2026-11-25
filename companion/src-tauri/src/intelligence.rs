@@ -2,13 +2,16 @@
 use crate::model::{Phase, SessionSnapshot};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{io::Read, sync::atomic::{AtomicBool, Ordering}, time::{Duration, Instant}};
+use std::{io::Read, sync::{Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 
 const ENDPOINT: &str = "http://127.0.0.1:11434/api/chat";
 const MODEL: &str = "qwen3.5:0.8b";
 const STRONGER_MODEL: &str = "qwen3.5:2b";
 const CLOUD_ENDPOINT: &str = "https://api.deepseek.com/chat/completions";
 const CLOUD_MODEL: &str = "deepseek-flash";
+const GROQ_ENDPOINT: &str = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_MODEL: &str = "openai/gpt-oss-120b";
+static GROQ_RETRY_AT: Mutex<Option<Instant>> = Mutex::new(None);
 const MAX_HISTORY: usize = 4;
 const MAX_RESPONSE: u64 = 65_536;
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -66,13 +69,14 @@ pub struct ModelReply {
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Provider { Local, Deepseek }
+pub enum Provider { Local, Deepseek, Groq }
 
 pub fn configured_provider() -> Result<Provider, String> {
     match std::env::var("OPLYRA_PROVIDER").as_deref() {
+        Ok("groq") => Ok(Provider::Groq),
         Ok("deepseek") => Ok(Provider::Deepseek),
         Ok("local") | Err(std::env::VarError::NotPresent) => Ok(Provider::Local),
-        _ => Err("Invalid OPLYRA_PROVIDER; use local or deepseek".into()),
+        _ => Err("Invalid OPLYRA_PROVIDER; use local, groq or deepseek".into()),
     }
 }
 
@@ -160,6 +164,11 @@ fn request_body(message: &str, snapshot: &SessionSnapshot, history: &[PreviousTu
         Provider::Deepseek => json!({
             "model": CLOUD_MODEL, "messages": messages, "stream": false,
             "thinking":{"type":"disabled"}, "max_tokens":120, "temperature":0.55
+        }),
+        Provider::Groq => json!({
+            "model": GROQ_MODEL, "messages": messages, "stream": false,
+            "reasoning_effort": "low", "include_reasoning": false,
+            "max_completion_tokens": 512, "temperature": 0.55
         })
     })
 }
@@ -173,17 +182,17 @@ fn parse_response(raw: &[u8]) -> Result<Generated, String> {
 
 fn parse_cloud_response(raw: &[u8]) -> Result<Generated, String> {
     if raw.len() as u64 > MAX_RESPONSE { return Err("Cloud response exceeded size limit".into()); }
-    let mut response: CloudEnvelope = serde_json::from_slice(raw).map_err(|_| "Invalid DeepSeek response envelope")?;
-    if response.choices.len() != 1 { return Err("Unexpected DeepSeek choices".into()); }
-    let choice = response.choices.pop().ok_or("Missing DeepSeek choice")?;
-    if choice.finish_reason.as_deref() != Some("stop") { return Err("Incomplete DeepSeek response".into()); }
+    let mut response: CloudEnvelope = serde_json::from_slice(raw).map_err(|_| "Invalid cloud response envelope")?;
+    if response.choices.len() != 1 { return Err("Unexpected cloud choices".into()); }
+    let choice = response.choices.pop().ok_or("Missing cloud choice")?;
+    if choice.finish_reason.as_deref() != Some("stop") { return Err("Incomplete cloud response".into()); }
     parse_message(choice.message)
 }
 
 fn parse_message(message: AssistantMessage) -> Result<Generated, String> {
     if message.role != "assistant" { return Err("Unexpected reply role".into()); }
     if message.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) {
-        return Err("Local model returned unexpected tool calls".into());
+        return Err("AI model returned unexpected tool calls".into());
     }
     let reply = message.content.trim().to_owned();
     if !valid_text(&reply, 300) || reply.chars().any(|c| matches!(c, '<' | '>' | '{' | '}')) {
@@ -200,6 +209,10 @@ fn parse_message(message: AssistantMessage) -> Result<Generated, String> {
     Ok(Generated { reply, reaction: Reaction::Attentive, proposal: None })
 }
 
+fn retry_delay(value: Option<&str>) -> Duration {
+    Duration::from_secs(value.and_then(|s| s.parse::<u64>().ok()).unwrap_or(60).clamp(1, 86_400))
+}
+
 struct Slot;
 impl Drop for Slot {
     fn drop(&mut self) { BUSY.store(false, Ordering::Release); }
@@ -207,18 +220,25 @@ impl Drop for Slot {
 
 pub fn generate(message: &str, snapshot: &SessionSnapshot, history: &[PreviousTurn]) -> Result<ModelReply, String> {
     let provider = configured_provider()?;
-    let model = match provider { Provider::Local => configured_local_model()?, Provider::Deepseek => CLOUD_MODEL };
+    let model = match provider { Provider::Local => configured_local_model()?, Provider::Deepseek => CLOUD_MODEL, Provider::Groq => GROQ_MODEL };
     let body = request_body(message, snapshot, history, provider, model)?;
     // Cloud is explicitly enabled by launch environment only. The API key is
     // never returned to the frontend, persisted or put into any prompt.
-    let key = if provider == Provider::Deepseek {
-        Some(std::env::var("DEEPSEEK_API_KEY").ok().filter(|k| !k.trim().is_empty())
-            .ok_or("DeepSeek API key missing")?)
-    } else { None };
+    let key = match provider {
+        Provider::Local => None,
+        Provider::Deepseek => Some(std::env::var("DEEPSEEK_API_KEY").ok().filter(|k| !k.trim().is_empty()).ok_or("DeepSeek API key missing")?),
+        Provider::Groq => Some(std::env::var("GROQ_API_KEY").ok().filter(|k| !k.trim().is_empty()).ok_or("Groq API key missing")?),
+    };
     if BUSY.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
         return Err("Local model already responding".into());
     }
     let _slot = Slot;
+    if provider == Provider::Groq {
+        let until = GROQ_RETRY_AT.lock().map_err(|_| "Groq rate-limit state unavailable")?;
+        if until.is_some_and(|t| t > Instant::now()) {
+            return Err("Groq rate limit reached; wait before trying again".into());
+        }
+    }
     let start = Instant::now();
     // Fixed endpoints, TLS verification for cloud, no redirects/proxies,
     // and no implicit provider fallback.
@@ -226,15 +246,20 @@ pub fn generate(message: &str, snapshot: &SessionSnapshot, history: &[PreviousTu
         .no_proxy().redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(2)).timeout(Duration::from_secs(45))
         .build().map_err(|_| "Could not initialize local model client")?;
-    let mut request = client.post(match provider { Provider::Local => ENDPOINT, Provider::Deepseek => CLOUD_ENDPOINT }).json(&body);
+    let mut request = client.post(match provider { Provider::Local => ENDPOINT, Provider::Deepseek => CLOUD_ENDPOINT, Provider::Groq => GROQ_ENDPOINT }).json(&body);
     if let Some(key) = key { request = request.bearer_auth(key); }
     let response = request.send().map_err(|_| "Selected AI provider unavailable or timed out")?;
+    if provider == Provider::Groq && response.status().as_u16() == 429 {
+        let delay = retry_delay(response.headers().get("retry-after").and_then(|v| v.to_str().ok()));
+        *GROQ_RETRY_AT.lock().map_err(|_| "Groq rate-limit state unavailable")? = Some(Instant::now() + delay);
+        return Err("Groq rate limit reached; wait before trying again".into());
+    }
     if !response.status().is_success() {
         return Err(format!("AI provider returned HTTP {}", response.status().as_u16()));
     }
     let mut bytes = Vec::new();
     response.take(MAX_RESPONSE + 1).read_to_end(&mut bytes).map_err(|_| "Could not read local model response")?;
-    let generated = match provider { Provider::Local => parse_response(&bytes)?, Provider::Deepseek => parse_cloud_response(&bytes)? };
+    let generated = match provider { Provider::Local => parse_response(&bytes)?, Provider::Deepseek | Provider::Groq => parse_cloud_response(&bytes)? };
     if generated.proposal.is_some_and(|intent| !intent.allowed(snapshot.phase)) {
         return Err("Action proposal is not valid for this session state".into());
     }
@@ -308,6 +333,23 @@ mod tests {
         assert_eq!(parse_cloud_response(reply).unwrap().proposal, Some(Intent::Pause));
         assert!(parse_cloud_response(br#"{"choices":[{"finish_reason":"length","message":{"role":"assistant","content":"PROPOSE PAUSE"}}]}"#).is_err());
         assert!(parse_cloud_response(br#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"PROPOSE DELETE"}}]}"#).is_err());
+    }
+    #[test]
+    fn groq_payload_uses_fixed_model_and_bounded_reasoning() {
+        let body = request_body("I'm going for coffee", &snapshot(Phase::Running), &[], Provider::Groq, MODEL).unwrap();
+        assert_eq!(GROQ_ENDPOINT, "https://api.groq.com/openai/v1/chat/completions");
+        assert_eq!(body["model"], GROQ_MODEL);
+        assert_eq!(body["reasoning_effort"], "low");
+        assert_eq!(body["include_reasoning"], false);
+        assert_eq!(body["max_completion_tokens"], 512);
+        for field in ["tools", "reasoning_format", "thinking", "options", "api_key"] {
+            assert!(body.get(field).is_none());
+        }
+        let result = parse_cloud_response(br#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"PROPOSE PAUSE"}}]}"#).unwrap();
+        assert_eq!(result.proposal, Some(Intent::Pause));
+        assert_eq!(retry_delay(Some("5")), Duration::from_secs(5));
+        assert_eq!(retry_delay(None), Duration::from_secs(60));
+        assert_eq!(retry_delay(Some("0")), Duration::from_secs(1));
     }
     #[test]
     fn accepts_display_only_reply() {

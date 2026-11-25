@@ -36,3 +36,18 @@ Run both providers against the same cases. Start a session with "I need to work 
 ## v0.9.1 — local model comparison (zero API fees)
 
 With the local Ollama server running, download `ollama pull qwen3.5:2b` once. Launch from companion with `OPLYRA_PROVIDER=local OPLYRA_LOCAL_MODEL=qwen3.5:2b npm run tauri dev`. Only the two official local tags qwen3.5:0.8b and qwen3.5:2b are accepted. No implicit online fallback. The response footer identifies the selected model. Keep the 0.8B model for comparison; set OPLYRA_LOCAL_MODEL=qwen3.5:0.8b to revert. Model quality, speed and RAM on the 8GB M1 remain experimental; download size is not runtime RAM. No screen context added.
+
+## v0.9.2 — Groq free-plan development experiment
+
+Use an API key from a Groq Free account only. Do not upgrade or add payment details. The application cannot verify the account's billing tier. Stop Ollama; cloud inference requires no local model server. From the companion directory in zsh, run:
+
+```sh
+unset DEEPSEEK_API_KEY
+read -rs 'GROQ_API_KEY?Groq API key: '; echo
+export GROQ_API_KEY
+OPLYRA_PROVIDER=groq npm run tauri dev
+```
+
+The key is not stored by the app. After quitting, `unset GROQ_API_KEY`. The fixed HTTPS endpoint uses openai/gpt-oss-120b, low reasoning effort, include_reasoning=false and a 512 completion-token cap (including reasoning). No tools, paid fallback, automatic retries at the application level, background polling, or model downloads. Existing session actions and confirmation rules remain unchanged. HTTP 429 blocks further Groq requests in this process for the provider's retry-after seconds (default 60 seconds); the app shows a quota notice and basic local dialogue remains available. Do not restart to bypass quota. The Free plan itself controls billing and usage. Verify account tier at https://console.groq.com/settings/billing and limits at https://console.groq.com/settings/limits. Typed message, recent four exchanges and declared session facts are transmitted to Groq; no screens or audio. Do not send sensitive information. Live API and dialogue quality require user testing; CI uses no API key.
+
+Official docs: https://console.groq.com/docs/reasoning and https://console.groq.com/docs/rate-limits
