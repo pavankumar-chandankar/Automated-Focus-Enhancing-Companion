@@ -19,7 +19,7 @@ export interface SessionSnapshot {
 }
 
 export type PreviousTurn = { user: string; reply: string };
-export type ModelReply = { reply: string; reaction: "attentive" | "encouraging"; latency_ms: number };
+export type ModelReply = { reply: string; reaction: "attentive" | "encouraging"; latency_ms: number; proposal: import("./dialogue").Intent | null };
 
 export const companion = {
   localReply: (message: string, previous: PreviousTurn | null) => invoke<ModelReply>("local_companion_reply", { message, previous }),

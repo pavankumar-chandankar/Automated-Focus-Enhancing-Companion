@@ -1,6 +1,7 @@
 mod model;
 mod policy;
 mod intelligence;
+mod overlay;
 use policy::{Feedback, SupportMode};
 
 use std::{fs, path::PathBuf, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
@@ -119,9 +120,8 @@ async fn local_companion_reply(store: State<'_, SessionStore>, message: String, 
 // The bin is a separate 112x112 logical-pixel surface, shown *only* while
 // the user intentionally holds and drags the companion. No fullscreen layer.
 #[tauri::command]
-fn begin_companion_drag(app: tauri::AppHandle) -> Result<(), String> {
+async fn begin_companion_drag(app: tauri::AppHandle) -> Result<(), String> {
     let main = app.get_webview_window("main").ok_or("Companion window unavailable")?;
-    let bin = app.get_webview_window("drop-zone").ok_or("Drop target unavailable")?;
     let monitor = main.current_monitor().map_err(|e| e.to_string())?
         .ok_or("No display available for drop target")?;
     let work = monitor.work_area();
@@ -129,47 +129,52 @@ fn begin_companion_drag(app: tauri::AppHandle) -> Result<(), String> {
     let margin = (24.0 * monitor.scale_factor()).round() as i32;
     let x = work.position.x + (work.size.width as i32 - bin_width) / 2;
     let y = work.position.y + work.size.height as i32 - bin_width - margin;
-    bin.set_position(PhysicalPosition::new(x, y)).map_err(|e| e.to_string())?;
-    // The target must not steal the mouse-up event from the held character.
-    bin.set_ignore_cursor_events(true).map_err(|e| e.to_string())?;
-    bin.show().map_err(|e| e.to_string())?;
-    Ok(())
+    // Construct the temporary native surface only during a drag.
+    let bin = overlay::create_bin(&app)?;
+    let show = (|| -> Result<(), String> {
+        bin.set_position(PhysicalPosition::new(x, y)).map_err(|e| e.to_string())?;
+        bin.set_ignore_cursor_events(true).map_err(|e| e.to_string())?;
+        bin.show().map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    if show.is_err() { let _ = overlay::destroy_bin(&app); }
+    show
 }
 
 #[tauri::command]
 fn cancel_companion_drag(app: tauri::AppHandle) -> Result<(), String> {
-    let bin = app.get_webview_window("drop-zone").ok_or("Drop target unavailable")?;
-    bin.hide().map_err(|e| e.to_string())
+    overlay::destroy_bin(&app)
 }
 
 #[tauri::command]
 fn finish_companion_drag(app: tauri::AppHandle) -> Result<bool, String> {
     let bin = app.get_webview_window("drop-zone").ok_or("Drop target unavailable")?;
-    let pos = bin.outer_position().map_err(|e| e.to_string())?;
-    let size = bin.outer_size().map_err(|e| e.to_string())?;
-    let cursor = app.cursor_position().map_err(|e| e.to_string())?;
-    let dx = cursor.x - (pos.x as f64 + size.width as f64 / 2.0);
-    let dy = cursor.y - (pos.y as f64 + size.height as f64 / 2.0);
-    let radius = (size.width.min(size.height) as f64) * 0.46;
-    let dropped = dx * dx + dy * dy <= radius * radius;
-    bin.hide().map_err(|e| e.to_string())?;
-    if dropped {
-        // Hiding is reversible from the menu bar; never delete work/session data.
-        app.get_webview_window("main").ok_or("Companion window unavailable")?
-            .hide().map_err(|e| e.to_string())?;
-    }
-    Ok(dropped)
+    let dropped = (|| -> Result<bool, String> {
+        let pos = bin.outer_position().map_err(|e| e.to_string())?;
+        let size = bin.outer_size().map_err(|e| e.to_string())?;
+        let cursor = app.cursor_position().map_err(|e| e.to_string())?;
+        let dx = cursor.x - (pos.x as f64 + size.width as f64 / 2.0);
+        let dy = cursor.y - (pos.y as f64 + size.height as f64 / 2.0);
+        let radius = (size.width.min(size.height) as f64) * 0.46;
+        Ok(dx * dx + dy * dy <= radius * radius)
+    })();
+    overlay::destroy_bin(&app)?;
+    // The frontend supplies its exact unsent draft before destroying main.
+    dropped
 }
 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            // A second launch must not resurrect a companion hidden in the tray.
+            let _ = app;
         }))
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            {
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
+            app.manage(overlay::OverlayState::default());
             let path = app.path().app_local_data_dir()?.join("session.json");
             let store = SessionStore::read(path).map_err(std::io::Error::other)?;
             app.manage(store);
@@ -183,18 +188,8 @@ pub fn run() {
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                    "hide" => {
-                        if let Some(bin) = app.get_webview_window("drop-zone") { let _ = bin.hide(); }
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.hide();
-                        }
-                    }
+                    "show" => overlay::request_show(app.clone()),
+                    "hide" => overlay::request_hide(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -203,17 +198,26 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                // The companion continues running and can be reopened from the tray.
-                api.prevent_close();
-                let _ = window.hide();
+                if window.label() == "main" {
+                    api.prevent_close();
+                    overlay::request_hide(window.app_handle());
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot, start_session, pause_session, resume_session, finish_session,
             save_next_step, set_quiet_mode, resume_with_assistance, set_support_mode,
             record_cue_feedback, reset_cue_preference, local_companion_reply, begin_companion_drag,
-            finish_companion_drag, cancel_companion_drag
+            finish_companion_drag, cancel_companion_drag,
+            overlay::load_overlay_draft, overlay::hide_companion
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Oplyra desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building Oplyra desktop")
+        .run(|_app, event| {
+            // Closing the final native surface must not quit the tray utility.
+            // Explicit menu-bar Quit uses app.exit(0), with Some(0).
+            if let tauri::RunEvent::ExitRequested { code: None, api, .. } = event {
+                api.prevent_exit();
+            }
+        });
 }

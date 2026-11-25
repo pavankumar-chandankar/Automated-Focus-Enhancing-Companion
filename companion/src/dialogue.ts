@@ -1,14 +1,55 @@
 import type { Phase } from "./native";
 
 export type Behaviour = "available" | "working" | "resting" | "attentive" | "encouraging" | "celebrating";
-export type Action = "none" | "start" | "pause" | "resume" | "finish" | "quiet";
+export type Intent = "start" | "pause" | "resume" | "finish" | "quiet" | "hide";
+export type Action = "none" | Intent;
 export type Plan = { action: Action; reply: string; behaviour: Behaviour; goal?: string; useModel?: boolean };
 
 export function restingBehaviour(phase: Phase): Behaviour {
   return phase === "running" ? "working" : phase === "paused" ? "resting" : "available";
 }
 
-// Explicit phrases only. No inferred mood, automatic monitoring or generative model.
+export function actionAllowed(action: Intent, phase: Phase): boolean {
+  switch (action) {
+    case "start": return phase === "idle";
+    case "pause": return phase === "running";
+    case "resume": return phase === "paused";
+    case "finish": return phase !== "idle";
+    case "quiet": case "hide": return true;
+    default: return false;
+  }
+}
+
+export function confirmedPlan(action: Intent, phase: Phase): Plan | null {
+  if (!actionAllowed(action, phase)) return null;
+  switch (action) {
+    case "start": return {action, goal: "Focus together", reply: "Let's begin. I'll keep you company.", behaviour:"working"};
+    case "pause": return {action, reply:"Take your time. Enjoy your break.", behaviour:"resting"};
+    case "resume": return {action, reply:"Welcome back. Let's keep going.", behaviour:"working"};
+    case "finish": return {action, reply:"Nice work showing up today.", behaviour:"celebrating"};
+    case "quiet": return {action, reply:"I'll keep things quiet.", behaviour:restingBehaviour(phase)};
+    case "hide": return {action, reply:"", behaviour:restingBehaviour(phase)};
+  }
+}
+
+export function proposalQuestion(action: Intent): string {
+  return ({start:"Shall we start a focus session?", pause:"Shall I pause our session while you take a break?",
+    resume:"Ready to resume our session?", finish:"Shall we end this session?",
+    quiet:"Would you like me to stay quiet?", hide:"Would you like me to hide for now?"})[action];
+}
+
+export type PendingAction = { action: Intent; phase: Phase; expiresAt: number };
+
+export function resolveConfirmation(input: string, pending: PendingAction | null, phase: Phase, now: number): "accept" | "decline" | "unrelated" | "expired" {
+  if (!pending) return "unrelated";
+  if (now >= pending.expiresAt || phase !== pending.phase || !actionAllowed(pending.action, phase)) return "expired";
+  const text = input.trim().toLowerCase().replace(/[.!?]+$/, "").trim();
+  if (/^(?:yes|yes please|yes, please|sure|go ahead|do it|okay|ok|confirm)$/.test(text)) return "accept";
+  if (/^(?:no|no thanks|no, thanks|not now|cancel|never mind|nevermind)$/.test(text)) return "decline";
+  return "unrelated";
+}
+
+// Direct actions use narrow complete phrases; model proposals always require confirmation.
 // Keep language handling separate from the native session and policy engines.
 export function planMessage(input: string, phase: Phase): Plan {
   const raw = input.trim();
@@ -22,19 +63,22 @@ export function planMessage(input: string, phase: Phase): Plan {
   if (/\b(?:kill myself|end my life|hurt myself|suicidal)\b/.test(text)) {
     return reply("Your safety matters more than work. Please reach out to someone you trust or local crisis support. If you might act on this now, contact emergency services.");
   }
+  if (/^(?:hide|hide yourself|hide oplyra|go away|leave me alone for now)$/.test(text)) {
+    return reply("", restingBehaviour(phase), "hide");
+  }
   if (/^(?:just sit with me|keep me company|stay with me|stay quiet|be quiet|don't interrupt me|no reminders|stop reminding me|quiet please)$/.test(text)) {
     return reply("I'll keep things quiet.", restingBehaviour(phase), "quiet");
   }
-  if (/^(?:i need a break|i want a break|let's take a break|take a break|pause|break time|i'm taking a break)$/.test(text)) {
+  if (/^(?:i need a break|i want a break|let's take a break|take a break|pause|break time|i'm taking a break|i am taking a break|i'm going to take a break|i am going to take a break|(?:please )?pause (?:the |our |my )?session(?:,? (?:i'm|i am) taking a break)?|(?:please )?pause,? (?:i'm|i am) taking a break)$/.test(text)) {
     if (phase === "running") return reply("Take your time.", "resting", "pause");
     return reply("Take your time. There's no rush.", restingBehaviour(phase));
   }
-  if (/^(?:i'm done|i am done|i finished|i'm finished|finished|end session|finish session|stop session|that's enough for today|done for today)$/.test(text)) {
+  if (/^(?:i'm done|i am done|i finished|i'm finished|finished|end session|finish session|stop session|that's enough for today|done for today|i'm finished for today|i am finished for today|(?:please )?end (?:the |our |my )session)$/.test(text)) {
     return phase === "idle"
       ? reply("Hope the rest of your day goes well.", "available")
       : reply("Nice work showing up today.", "celebrating", "finish");
   }
-  if (/^(?:resume|i'm back|i am back|let's get back to work|back to work|let's continue|continue working)$/.test(text)) {
+  if (/^(?:resume|i'm back|i am back|let's get back to work|back to work|let's continue|continue working|(?:please )?resume (?:the |our |my )?session|alright,? let's get going again|let's get going again)$/.test(text)) {
     if (phase === "paused") return reply("Welcome back. One step at a time.", "working", "resume");
     if (phase === "running") return reply("One step at a time.", "working");
     return reply("Ready when you are. Say “let's focus” to begin.");
@@ -54,6 +98,8 @@ export function planMessage(input: string, phase: Phase): Plan {
   if (/^(?:what can you do|help|how do you work)$/.test(text)) {
     return reply("I'm a focus companion. Try “let's focus”, “I'm distracted”, “I need a break” or “I'm done”.");
   }
+  // Do not turn a negated or mixed work declaration into a session start.
+  if (/\b(?:don't|do not|not|never|unless|if|but)\b/.test(text)) return conversational("Tell me what you'd like to do.");
   // Only explicitly declared work is stored. No free-form transcript is saved.
   const goalMatch = raw.match(/^(?:i (?:need|want) to (?:work on|study)|let's work on|focus on|start focusing on)\s+(.+)$/i);
   const start = /^(?:let's (?:focus|study|work)(?: together)?|start(?: a)? focus session|start focusing|focus time)$/.test(text);

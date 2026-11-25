@@ -43,7 +43,8 @@
         "maximizable": false,
         "fullscreen": false,
         "visible": false,
-        "focusable": false
+        "focusable": false,
+        "create": false
       }
     ],
     "security": {
