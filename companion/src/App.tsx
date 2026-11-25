@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { companion, type Phase, type SessionSnapshot } from "./native";
+import { companion, type Phase, type SessionSnapshot, type PreviousTurn } from "./native";
 import { planMessage, restingBehaviour, type Behaviour } from "./dialogue";
 
 // Logical pixels. The visible native surface shrinks to the character when closed;
@@ -98,6 +98,9 @@ function CompanionApp() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [reply, setReply] = useState("");
+  const [source, setSource] = useState<"local" | "fallback" | "command" | null>(null);
+  const previousTurn = useRef<PreviousTurn | null>(null);
+  const [latency, setLatency] = useState<number | null>(null);
   const [reaction, setReaction] = useState<Behaviour | null>(null);
   const expandedRef = useRef(false);
   const visibilityEpoch = useRef(0);
@@ -124,7 +127,7 @@ function CompanionApp() {
       expandedRef.current = open;
       visibilityEpoch.current += 1;
       setExpanded(open);
-      if (!open) { setReply(""); setReaction(null); setMessage(""); }
+      if (!open) { setReply(""); setReaction(null); setMessage(""); previousTurn.current = null; setSource(null); setLatency(null); }
     } catch (failure) { setError(`Could not resize companion: ${String(failure)}`); }
     finally { setResizing(false); }
   }
@@ -167,6 +170,9 @@ function CompanionApp() {
         setReply("");
         setReaction(null);
         setMessage("");
+        previousTurn.current = null;
+        setSource(null);
+        setLatency(null);
       }
       await gesture.geometryPromise;
       if (!gesture.base) return; // No native coordinates: do not open an unusable bin.
@@ -258,14 +264,40 @@ function CompanionApp() {
 
   async function sendMessage() {
     if (actionRunning.current || !current || !message.trim()) return;
-    const plan = planMessage(message, current.phase);
+    const userMessage = message.trim();
+    const plan = planMessage(userMessage, current.phase);
     actionRunning.current = true;
     const visibility = visibilityEpoch.current;
     setBusy(true);
     setError("");
     setMessage("");
+    setSource(null);
+    setLatency(null);
     try {
       let data = current;
+      if (plan.action === "none" && plan.useModel) {
+        setReply("Thinking…");
+        setReaction("attentive");
+        try {
+          const generated = await companion.localReply(userMessage, previousTurn.current);
+          if (expandedRef.current && visibility === visibilityEpoch.current) {
+            setReply(generated.reply);
+            setReaction(generated.reaction);
+            setSource("local");
+            setLatency(generated.latency_ms);
+            previousTurn.current = { user: userMessage, reply: generated.reply };
+          }
+        } catch {
+          if (expandedRef.current && visibility === visibilityEpoch.current) {
+            setReply(plan.reply);
+            setReaction(plan.behaviour);
+            setSource("fallback");
+            previousTurn.current = null;
+          }
+        }
+        return;
+      }
+      previousTurn.current = null;
       switch (plan.action) {
         case "start": data = await companion.start(plan.goal ?? "Focus together", "Continue the chosen task"); break;
         case "pause": data = await companion.pause(); break;
@@ -280,6 +312,7 @@ function CompanionApp() {
       if (expandedRef.current && visibility === visibilityEpoch.current) {
         setReply(plan.reply);
         setReaction(plan.behaviour);
+        setSource("command");
       }
     } catch (failure) {
       setError(String(failure));
@@ -345,7 +378,7 @@ function CompanionApp() {
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
             </button>
           </form>
-          <p className="conversation-note">Local preview · Try “let's focus” or “I need a break”.</p>
+          <p className="conversation-note">{source === "local" ? `Local AI · ${((latency ?? 0) / 1000).toFixed(1)} s` : source === "fallback" ? "Local AI unavailable · basic response" : source === "command" ? "Local companion" : "Private by design · Talk to Oplyra."}</p>
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
       )}
