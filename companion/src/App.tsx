@@ -110,6 +110,7 @@ function CompanionApp() {
   const history = useRef<PreviousTurn[]>([]);
   const pendingAction = useRef<PendingAction | null>(null);
   const [latency, setLatency] = useState<number | null>(null);
+  const [activeModel, setActiveModel] = useState<string | null>(null);
   const [reaction, setReaction] = useState<Behaviour | null>(null);
   const expandedRef = useRef(false);
   const visibilityEpoch = useRef(0);
@@ -375,6 +376,7 @@ function CompanionApp() {
           const generated = await companion.localReply(userMessage, history.current);
           if (expandedRef.current && visibility === visibilityEpoch.current) {
             setSource(generated.provider);
+            setActiveModel(generated.model);
             setLatency(generated.latency_ms);
             if (generated.proposal) {
               // No model-generated instruction is executed. A proposal is a
@@ -503,7 +505,7 @@ function CompanionApp() {
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
             </button>
           </form>
-          <p className="conversation-note">{pendingAction.current ? "Reply yes or no · no change yet" : source === "local" || source === "deepseek" ? `${source === "deepseek" ? "DeepSeek · online" : "Local AI"} · ${((latency ?? 0) / 1000).toFixed(1)} s` : source === "fallback" ? "AI unavailable · basic response" : provider === "deepseek" ? "DeepSeek online · chat and session context sent" : provider === "local" ? "On-device · Talk to Oplyra." : "AI provider loading…"} </p>
+          <p className="conversation-note">{pendingAction.current ? "Reply yes or no · no change yet" : source === "local" || source === "deepseek" ? `${source === "deepseek" ? "DeepSeek · online" : activeModel ?? "Local AI"} · ${((latency ?? 0) / 1000).toFixed(1)} s` : source === "fallback" ? "AI unavailable · basic response" : provider === "deepseek" ? "DeepSeek online · chat and session context sent" : provider === "local" ? "On-device · Talk to Oplyra." : "AI provider loading…"} </p>
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
       )}

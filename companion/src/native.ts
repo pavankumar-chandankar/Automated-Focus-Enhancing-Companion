@@ -20,7 +20,7 @@ export interface SessionSnapshot {
 
 export type PreviousTurn = { user: string; reply: string };
 export type Provider = "local" | "deepseek";
-export type ModelReply = { provider: Provider; reply: string; reaction: "attentive" | "encouraging"; latency_ms: number; proposal: import("./dialogue").Intent | null };
+export type ModelReply = { provider: Provider; model: string; reply: string; reaction: "attentive" | "encouraging"; latency_ms: number; proposal: import("./dialogue").Intent | null };
 
 export const companion = {
   provider: () => invoke<Provider>("intelligence_provider"),

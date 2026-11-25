@@ -32,3 +32,7 @@ Run both providers against the same cases. Start a session with "I need to work 
 - https://api-docs.deepseek.com/quick_start/pricing/
 - https://api-docs.deepseek.com/api/create-chat-completion/
 - https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017
+
+## v0.9.1 — local model comparison (zero API fees)
+
+With the local Ollama server running, download `ollama pull qwen3.5:2b` once. Launch from companion with `OPLYRA_PROVIDER=local OPLYRA_LOCAL_MODEL=qwen3.5:2b npm run tauri dev`. Only the two official local tags qwen3.5:0.8b and qwen3.5:2b are accepted. No implicit online fallback. The response footer identifies the selected model. Keep the 0.8B model for comparison; set OPLYRA_LOCAL_MODEL=qwen3.5:0.8b to revert. Model quality, speed and RAM on the 8GB M1 remain experimental; download size is not runtime RAM. No screen context added.

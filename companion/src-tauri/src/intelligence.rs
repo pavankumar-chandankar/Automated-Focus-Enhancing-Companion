@@ -6,6 +6,7 @@ use std::{io::Read, sync::atomic::{AtomicBool, Ordering}, time::{Duration, Insta
 
 const ENDPOINT: &str = "http://127.0.0.1:11434/api/chat";
 const MODEL: &str = "qwen3.5:0.8b";
+const STRONGER_MODEL: &str = "qwen3.5:2b";
 const CLOUD_ENDPOINT: &str = "https://api.deepseek.com/chat/completions";
 const CLOUD_MODEL: &str = "deepseek-flash";
 const MAX_HISTORY: usize = 4;
@@ -60,6 +61,7 @@ pub struct ModelReply {
     pub latency_ms: u64,
     pub proposal: Option<Intent>,
     pub provider: Provider,
+    pub model: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -71,6 +73,22 @@ pub fn configured_provider() -> Result<Provider, String> {
         Ok("deepseek") => Ok(Provider::Deepseek),
         Ok("local") | Err(std::env::VarError::NotPresent) => Ok(Provider::Local),
         _ => Err("Invalid OPLYRA_PROVIDER; use local or deepseek".into()),
+    }
+}
+
+fn select_local_model(value: Option<&str>) -> Result<&'static str, String> {
+    match value {
+        None | Some(MODEL) => Ok(MODEL),
+        Some(STRONGER_MODEL) => Ok(STRONGER_MODEL),
+        _ => Err("Invalid OPLYRA_LOCAL_MODEL; choose qwen3.5:0.8b or qwen3.5:2b".into()),
+    }
+}
+
+fn configured_local_model() -> Result<&'static str, String> {
+    match std::env::var("OPLYRA_LOCAL_MODEL") {
+        Ok(value) => select_local_model(Some(&value)),
+        Err(std::env::VarError::NotPresent) => select_local_model(None),
+        Err(_) => Err("Invalid local model configuration".into()),
     }
 }
 
@@ -131,11 +149,11 @@ fn messages(message: &str, snapshot: &SessionSnapshot, history: &[PreviousTurn])
     Ok(messages)
 }
 
-fn request_body(message: &str, snapshot: &SessionSnapshot, history: &[PreviousTurn], provider: Provider) -> Result<Value, String> {
+fn request_body(message: &str, snapshot: &SessionSnapshot, history: &[PreviousTurn], provider: Provider, local_model: &str) -> Result<Value, String> {
     let messages = messages(message, snapshot, history)?;
     Ok(match provider {
         Provider::Local => json!({
-            "model": MODEL, "messages": messages, "stream": false, "think": false,
+            "model": select_local_model(Some(local_model))?, "messages": messages, "stream": false, "think": false,
             "keep_alive": 0,
             "options": {"num_ctx":4096,"num_predict":120,"temperature":0.55}
         }),
@@ -189,7 +207,8 @@ impl Drop for Slot {
 
 pub fn generate(message: &str, snapshot: &SessionSnapshot, history: &[PreviousTurn]) -> Result<ModelReply, String> {
     let provider = configured_provider()?;
-    let body = request_body(message, snapshot, history, provider)?;
+    let model = match provider { Provider::Local => configured_local_model()?, Provider::Deepseek => CLOUD_MODEL };
+    let body = request_body(message, snapshot, history, provider, model)?;
     // Cloud is explicitly enabled by launch environment only. The API key is
     // never returned to the frontend, persisted or put into any prompt.
     let key = if provider == Provider::Deepseek {
@@ -219,7 +238,7 @@ pub fn generate(message: &str, snapshot: &SessionSnapshot, history: &[PreviousTu
     if generated.proposal.is_some_and(|intent| !intent.allowed(snapshot.phase)) {
         return Err("Action proposal is not valid for this session state".into());
     }
-    Ok(ModelReply { reply: generated.reply, reaction: generated.reaction, latency_ms: start.elapsed().as_millis() as u64, proposal: generated.proposal, provider })
+    Ok(ModelReply { reply: generated.reply, reaction: generated.reaction, latency_ms: start.elapsed().as_millis() as u64, proposal: generated.proposal, provider, model: model.to_owned() })
 }
 
 #[cfg(test)]
@@ -238,7 +257,7 @@ mod tests {
     }
     #[test]
     fn bounded_loopback_request_has_no_tools_or_cloud() {
-        let body = request_body("My mind keeps wandering", &snapshot(Phase::Running), &[], Provider::Local).unwrap();
+        let body = request_body("My mind keeps wandering", &snapshot(Phase::Running), &[], Provider::Local, MODEL).unwrap();
         assert_eq!(ENDPOINT, "http://127.0.0.1:11434/api/chat");
         assert_eq!(body["model"], MODEL);
         assert_eq!(body["keep_alive"], 0);
@@ -249,9 +268,20 @@ mod tests {
         assert_eq!(body["messages"].as_array().unwrap().len(), 2);
     }
     #[test]
+    fn model_selection_is_local_and_allowlisted() {
+        assert_eq!(select_local_model(None).unwrap(), MODEL);
+        assert_eq!(select_local_model(Some(STRONGER_MODEL)).unwrap(), STRONGER_MODEL);
+        assert!(select_local_model(Some("qwen3.5:cloud")).is_err());
+        let body = request_body("hello", &snapshot(Phase::Idle), &[], Provider::Local, STRONGER_MODEL).unwrap();
+        assert_eq!(body["model"], STRONGER_MODEL);
+        assert!(body.get("tools").is_none());
+        assert_eq!(body["keep_alive"], 0);
+        assert!(request_body("hello", &snapshot(Phase::Idle), &[], Provider::Local, "other:cloud").is_err());
+    }
+    #[test]
     fn memory_and_current_context_are_bounded() {
         let history: Vec<_> = (0..4).map(|_| PreviousTurn { user:"Long day".into(), reply:"Take your time.".into() }).collect();
-        let body = request_body("Still tired", &snapshot(Phase::Paused), &history, Provider::Local).unwrap();
+        let body = request_body("Still tired", &snapshot(Phase::Paused), &history, Provider::Local, MODEL).unwrap();
         assert_eq!(body["messages"].as_array().unwrap().len(), 10);
         assert_eq!(body["messages"][1]["content"], "Long day");
         assert_eq!(body["messages"][9]["content"], "Still tired");
@@ -262,12 +292,12 @@ mod tests {
         assert_eq!(facts["screen_observation"], false);
         assert!(context(&snapshot(Phase::Idle))["declared_goal"].is_null());
         let too_many: Vec<_> = (0..5).map(|_| PreviousTurn { user:"hi".into(), reply:"hello".into() }).collect();
-        assert!(request_body("Still tired", &snapshot(Phase::Idle), &too_many, Provider::Local).is_err());
-        assert!(request_body(&"x".repeat(301), &snapshot(Phase::Idle), &[], Provider::Local).is_err());
+        assert!(request_body("Still tired", &snapshot(Phase::Idle), &too_many, Provider::Local, MODEL).is_err());
+        assert!(request_body(&"x".repeat(301), &snapshot(Phase::Idle), &[], Provider::Local, MODEL).is_err());
     }
     #[test]
     fn cloud_payload_and_response_use_same_action_boundary() {
-        let body = request_body("I'm going for coffee", &snapshot(Phase::Running), &[], Provider::Deepseek).unwrap();
+        let body = request_body("I'm going for coffee", &snapshot(Phase::Running), &[], Provider::Deepseek, MODEL).unwrap();
         assert_eq!(body["model"], CLOUD_MODEL);
         assert_eq!(body["thinking"]["type"], "disabled");
         assert_eq!(body["max_tokens"], 120);
