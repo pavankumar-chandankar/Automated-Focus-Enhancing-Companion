@@ -96,7 +96,14 @@ function CompanionApp() {
   const pendingPosition = useRef<PhysicalPosition | null>(null);
   const movingPosition = useRef(false);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("");
+  const [message, setMessageState] = useState("");
+  const draftRef = useRef("");
+  const hiding = useRef(false);
+  const finishingDrag = useRef(false);
+  function setMessage(value: string) {
+    draftRef.current = value;
+    setMessageState(value);
+  }
   const [reply, setReply] = useState("");
   const [source, setSource] = useState<"local" | "fallback" | "command" | null>(null);
   const previousTurn = useRef<PreviousTurn | null>(null);
@@ -110,11 +117,10 @@ function CompanionApp() {
 
   useEffect(() => {
     let active = true;
+    // Draft hydration happens after registering the native hide listener below.
     void companion.snapshot().then((data) => {
-      if (!active) return;
-      setCurrent(data);
-      setReady(true);
-    }).catch((e: unknown) => { if (active) { setError(String(e)); setReady(true); } });
+      if (active) setCurrent(data);
+    }).catch((e: unknown) => { if (active) setError(String(e)); });
     return () => { active = false; };
   }, []);
 
@@ -123,26 +129,51 @@ function CompanionApp() {
     previousTurn.current = null;
     setReply("");
     setReaction(null);
-    setMessage("");
+    // Closing or moving a bubble must never discard unsent input.
     setSource(null);
     setLatency(null);
   }
 
+  async function hideOverlay() {
+    if (hiding.current) return;
+    hiding.current = true;
+    visibilityEpoch.current += 1;
+    pendingAction.current = null;
+    // The native tray request also uses this path; preserve the exact draft
+    // rather than depending on asynchronous per-keystroke IPC or disk storage.
+    try {
+      // A tray hide may arrive while a bin is still being constructed.
+      // Let that creation finish before native teardown can destroy both windows.
+      const gesture = held.current;
+      if (gesture) {
+        gesture.ended = true;
+        held.current = null;
+        await gesture.startPromise;
+      }
+      while (movingPosition.current) {
+        await new Promise<void>(resolve => window.setTimeout(resolve, 12));
+      }
+      await invoke("hide_companion", { draft: draftRef.current });
+    } catch (failure) {
+      hiding.current = false;
+      setDragging(false);
+      setError("Could not hide Oplyra: " + String(failure));
+    }
+  }
+
   useEffect(() => {
-    // Tray/native hides also invalidate a pending confirmation, not only drag.
     let disposed = false;
     let cleanup: (() => void) | undefined;
-    void appWindow.listen("oplyra-hidden", () => {
-      if (disposed) return;
-      visibilityEpoch.current += 1;
-      expandedRef.current = false;
-      setExpanded(false);
-      clearConversation();
-      void appWindow.setSize(COMPACT).catch(() => {});
-    }).then(unlisten => {
-      if (disposed) unlisten();
-      else cleanup = unlisten;
-    }).catch(() => {});
+    void appWindow.listen("oplyra-request-hide", () => {
+      if (!disposed) void hideOverlay();
+    }).then(async unlisten => {
+      if (disposed) { unlisten(); return; }
+      cleanup = unlisten;
+      const draft = await invoke<string>("load_overlay_draft");
+      if (!disposed) { setMessage(draft); setReady(true); }
+    }).catch((failure: unknown) => {
+      if (!disposed) setError("Could not restore the overlay: " + String(failure));
+    });
     return () => { disposed = true; cleanup?.(); };
   }, []);
 
@@ -192,21 +223,24 @@ function CompanionApp() {
     // Called only after movement exceeds the click/drag threshold. The position
     // request was already started on pointerdown, to minimise perceived latency.
     try {
-      if (expanded) {
+      // Keep the open bubble and its text in place relative to the character.
+      // Moving is not a request to erase a draft or close a conversation.
+      if (pendingAction.current) {
         pendingAction.current = null;
-        visibilityEpoch.current += 1;
-        await appWindow.setSize(COMPACT);
-        expandedRef.current = false;
-        visibilityEpoch.current += 1;
-        setExpanded(false);
-        clearConversation();
+        setReply("Tell me what you'd like to do.");
+        setSource(null);
       }
+      if (actionRunning.current) {
+        setReply("Ready when you are.");
+        setSource(null);
+      }
+      visibilityEpoch.current += 1;
       await gesture.geometryPromise;
       if (!gesture.base) return; // No native coordinates: do not open an unusable bin.
       // Even a brief drag should move the character; pointerup will wait for
       // the latest coalesced native position before considering a drop.
       updateDragPosition(gesture);
-      if (gesture.ended) return;
+      if (gesture.ended || hiding.current) return;
       await invoke("begin_companion_drag");
       gesture.binReady = true;
     } catch (failure) {
@@ -216,7 +250,7 @@ function CompanionApp() {
   }
 
   function onCharacterPointerDown(event: ReactPointerEvent<HTMLButtonElement>) {
-    if (event.button !== 0 || resizing || held.current) return;
+    if (event.button !== 0 || resizing || held.current || finishingDrag.current || hiding.current) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     const gesture: DragGesture = {
@@ -270,6 +304,7 @@ function CompanionApp() {
       if (!cancelled) void toggleDetails(!expanded);
       return;
     }
+    finishingDrag.current = true;
     void (async () => {
       try {
         // A quick release can race the native bin/show IPC. Wait for startup,
@@ -278,19 +313,21 @@ function CompanionApp() {
         while (movingPosition.current) {
           await new Promise<void>((resolve) => window.setTimeout(resolve, 12));
         }
-        if (gesture.binReady) {
-          await invoke(cancelled ? "cancel_companion_drag" : "finish_companion_drag");
+        if (gesture.binReady && !hiding.current) {
+          if (cancelled) await invoke("cancel_companion_drag");
+          else if (await invoke<boolean>("finish_companion_drag")) await hideOverlay();
         }
       } catch (failure) {
         setError(`Could not complete drag: ${String(failure)}`);
       } finally {
+        finishingDrag.current = false;
         setDragging(false);
       }
     })();
   }
 
   async function sendMessage() {
-    if (actionRunning.current || !current || !message.trim()) return;
+    if (actionRunning.current || hiding.current || !current || !message.trim()) return;
     const userMessage = message.trim();
     const pending = pendingAction.current;
     pendingAction.current = null;
@@ -372,13 +409,8 @@ function CompanionApp() {
         case "finish": data = await companion.finish(); break;
         case "quiet": data = await companion.setSupportMode("quiet"); break;
         case "hide":
-          // Hiding never finishes or deletes a session. Menu bar restores it.
-          await appWindow.setSize(COMPACT);
-          visibilityEpoch.current += 1;
-          expandedRef.current = false;
-          setExpanded(false);
-          clearConversation();
-          await appWindow.hide();
+          // Hiding never finishes or deletes a session. Menu bar recreates it.
+          await hideOverlay();
           return;
         case "none": break;
       }

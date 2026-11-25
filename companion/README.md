@@ -37,3 +37,7 @@ See [LOCAL_AI_V07.md](LOCAL_AI_V07.md) for installing the optional local model, 
 ## v0.8 functional intelligence
 
 See [FUNCTIONAL_INTELLIGENCE_V08.md](FUNCTIONAL_INTELLIGENCE_V08.md). The language model can suggest only an allowlisted action. Unfamiliar model proposals require explicit yes/no confirmation, with a 60-second expiry. Direct clear commands remain immediate. No additional downloads or dependencies.
+
+## v0.8.1 menu-bar lifecycle and draft preservation
+
+See [OVERLAY_LIFECYCLE_V081.md](OVERLAY_LIFECYCLE_V081.md). The drop target is created on demand and destroyed after dragging; hiding destroys the companion window and leaves only the tray process. macOS accessory activation and LSUIElement remove conventional application presence. Unsent drafts survive moving, folding and tray restoration in RAM until quit.
