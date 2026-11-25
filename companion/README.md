@@ -45,3 +45,7 @@ See [OVERLAY_LIFECYCLE_V081.md](OVERLAY_LIFECYCLE_V081.md). The drop target is c
 ## v0.9 contextual intelligence
 
 See [CONTEXTUAL_INTELLIGENCE_V09.md](CONTEXTUAL_INTELLIGENCE_V09.md). The default local provider and explicit experimental DeepSeek cloud provider share a versioned personality prompt, current native session facts, four recent exchanges and the existing confirmed action protocol. No cloud requests without explicit launch configuration. No screen data or microphone access.
+
+## v0.10 contextual awareness
+
+See [CONTEXTUAL_AWARENESS_V010.md](CONTEXTUAL_AWARENESS_V010.md). macOS-only session-scoped, opt-in foreground-app category and inactivity sampling; conservative local check-ins, no observation data sent to AI. Voice remains deferred.

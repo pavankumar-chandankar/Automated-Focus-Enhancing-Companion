@@ -22,7 +22,14 @@ export type PreviousTurn = { user: string; reply: string };
 export type Provider = "local" | "deepseek" | "groq";
 export type ModelReply = { provider: Provider; model: string; reply: string; reaction: "attentive" | "encouraging"; latency_ms: number; proposal: import("./dialogue").Intent | null };
 
+export type AwarenessCue = "leisure_check" | "return_check";
+export type AwarenessStatus = { enabled: boolean; supported: boolean; category: "leisure" | "browser" | "other" | "unavailable"; cue: AwarenessCue | null };
+
 export const companion = {
+  awarenessStatus: () => invoke<AwarenessStatus>("awareness_status"),
+  setAwareness: (enabled: boolean) => invoke<AwarenessStatus>("set_awareness", { enabled }),
+  sampleAwareness: () => invoke<AwarenessStatus>("sample_awareness"),
+  suspendAwareness: () => invoke<void>("suspend_awareness"),
   provider: () => invoke<Provider>("intelligence_provider"),
   localReply: (message: string, history: PreviousTurn[]) => invoke<ModelReply>("local_companion_reply", { message, history }),
   snapshot: () => invoke<SessionSnapshot>("get_snapshot"),

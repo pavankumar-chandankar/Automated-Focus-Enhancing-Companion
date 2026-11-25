@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { companion, type Phase, type SessionSnapshot, type PreviousTurn, type Provider } from "./native";
-import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQuestion, resolveConfirmation, rememberTurn, type Behaviour, type PendingAction } from "./dialogue";
+import { companion, type Phase, type SessionSnapshot, type PreviousTurn, type Provider, type AwarenessStatus, type AwarenessCue } from "./native";
+import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQuestion, resolveConfirmation, rememberTurn, awarenessCommand, type Behaviour, type PendingAction } from "./dialogue";
 
 // Logical pixels. The visible native surface shrinks to the character when closed;
 // it is never a conventional full-window application.
@@ -111,6 +111,11 @@ function CompanionApp() {
   const pendingAction = useRef<PendingAction | null>(null);
   const [latency, setLatency] = useState<number | null>(null);
   const [activeModel, setActiveModel] = useState<string | null>(null);
+  const [awareness, setAwareness] = useState<AwarenessStatus | null>(null);
+  const [checkIn, setCheckIn] = useState<AwarenessCue | null>(null);
+  const checkInExpiry = useRef(0);
+  const awarenessPending = useRef<number | null>(null);
+  const awarenessEpoch = useRef(0);
   const [aiNotice, setAiNotice] = useState("");
   const [reaction, setReaction] = useState<Behaviour | null>(null);
   const expandedRef = useRef(false);
@@ -121,6 +126,7 @@ function CompanionApp() {
   useEffect(() => {
     let active = true;
     // Draft hydration happens after registering the native hide listener below.
+    void companion.awarenessStatus().then(value => { if (active && awarenessEpoch.current === 0) setAwareness(value); }).catch(() => {});
     void companion.provider().then(value => { if (active) setProvider(value); }).catch(failure => { if (active) setError(String(failure)); });
     void companion.snapshot().then((data) => {
       if (active) setCurrent(data);
@@ -130,6 +136,7 @@ function CompanionApp() {
 
   function clearConversation() {
     pendingAction.current = null;
+    awarenessPending.current = null;
     // Folding the bubble does not erase conversational context.
     setReply("");
     setReaction(null);
@@ -138,9 +145,54 @@ function CompanionApp() {
     setLatency(null);
   }
 
+  function clearAwareness() {
+    awarenessEpoch.current += 1;
+    awarenessPending.current = null;
+    setAwareness(old => old ? { ...old, enabled: false, category: "unavailable", cue: null } : null);
+    setCheckIn(null);
+  }
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void appWindow.listen("oplyra-awareness-stopped", () => { if (!disposed) clearAwareness(); })
+      .then(unlisten => { if (disposed) unlisten(); else cleanup = unlisten; }).catch(() => {});
+    return () => { disposed = true; cleanup?.(); };
+  }, []);
+
+  useEffect(() => {
+    // No poller while off, paused, expanded, dragging, busy, or destroyed.
+    if (!awareness?.enabled || current?.phase !== "running" || expanded || dragging || busy || !ready) return;
+    let disposed = false;
+    let inFlight = false;
+    const poll = async () => {
+      if (disposed || inFlight || expandedRef.current || held.current || hiding.current || document.hidden) return;
+      inFlight = true;
+      const epoch = awarenessEpoch.current;
+      try {
+        const result = await companion.sampleAwareness();
+        if (disposed || epoch !== awarenessEpoch.current || expandedRef.current || hiding.current) return;
+        setAwareness(result);
+        if (!result.enabled) setCheckIn(null);
+        else if (result.cue) { checkInExpiry.current = performance.now() + 60_000; setCheckIn(result.cue); }
+        else if (performance.now() >= checkInExpiry.current) setCheckIn(null);
+      } catch {
+        if (!disposed && epoch === awarenessEpoch.current) {
+          clearAwareness();
+          void companion.setAwareness(false).catch(() => {});
+        }
+      } finally { inFlight = false; }
+    };
+    void poll();
+    const timer = window.setInterval(() => { void poll(); }, 5000);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [awareness?.enabled, current?.phase, expanded, dragging, busy, ready]);
+
   async function hideOverlay() {
     if (hiding.current) return;
     hiding.current = true;
+    clearAwareness();
+    void companion.setAwareness(false).catch(() => {});
     visibilityEpoch.current += 1;
     pendingAction.current = null;
     // The native tray request also uses this path; preserve the exact draft
@@ -185,7 +237,11 @@ function CompanionApp() {
     if (resizing) return;
     setResizing(true);
     setError("");
-    if (!open) { visibilityEpoch.current += 1; pendingAction.current = null; }
+    if (!open) { visibilityEpoch.current += 1; pendingAction.current = null; awarenessPending.current = null; }
+    if (open && awareness?.enabled) {
+      awarenessEpoch.current += 1;
+      void companion.suspendAwareness().catch(() => {});
+    }
     try {
       // The hit-test region grows only when the user explicitly opens controls.
       await appWindow.setSize(open ? OPEN : COMPACT);
@@ -193,6 +249,12 @@ function CompanionApp() {
       visibilityEpoch.current += 1;
       setExpanded(open);
       if (!open) clearConversation();
+      else if (checkIn && performance.now() < checkInExpiry.current) {
+        setReply(checkIn === "leisure_check" ? "Still on task, or taking a break?" : "Welcome back. Ready to pick up where you left off?");
+        setReaction("attentive");
+        setSource("command");
+        setCheckIn(null);
+      }
     } catch (failure) { setError(`Could not resize companion: ${String(failure)}`); }
     finally { setResizing(false); }
   }
@@ -229,6 +291,10 @@ function CompanionApp() {
     try {
       // Keep the open bubble and its text in place relative to the character.
       // Moving is not a request to erase a draft or close a conversation.
+      awarenessPending.current = null;
+      awarenessEpoch.current += 1;
+      setCheckIn(null);
+      if (awareness?.enabled) void companion.suspendAwareness().catch(() => {});
       if (pendingAction.current) {
         pendingAction.current = null;
         setReply("Tell me what you'd like to do.");
@@ -333,6 +399,48 @@ function CompanionApp() {
   async function sendMessage() {
     if (actionRunning.current || hiding.current || !current || !message.trim()) return;
     const userMessage = message.trim();
+    const awarenessRequest = awarenessCommand(userMessage);
+    const consent = awarenessPending.current;
+    awarenessPending.current = null;
+    const consentAnswer = consent !== null ? resolveConfirmation(userMessage, { action: "quiet", phase: current.phase, expiresAt: consent }, current.phase, performance.now()) : "unrelated";
+    if (awarenessRequest || consentAnswer === "accept" || consentAnswer === "decline" || (consentAnswer === "expired" && /^(?:yes|sure|ok|okay|no|confirm)[.!?]*$/i.test(userMessage))) {
+      pendingAction.current = null;
+      setMessage(""); setSource("command"); setLatency(null); setReaction("attentive"); setError("");
+      if (awarenessRequest === "enable") {
+        if (current.phase !== "running") setReply("Start a focus session first, then ask me to watch your activity.");
+        else if (awareness?.supported === false) setReply("Activity awareness is only available on macOS in this preview.");
+        else if (awareness?.enabled) setReply("Activity awareness is already on. Say stop watching whenever you want.");
+        else {
+          awarenessPending.current = performance.now() + 60_000;
+          setReply("I can check the active app type and idle time locally, until you pause, hide or finish. I may offer gentle check-ins. No screen content is read. Start?");
+        }
+        return;
+      }
+      if (awarenessRequest === "status") {
+        setReply(awareness?.enabled ? "Awareness is on for this session. I check app type and idle time when the bubble is closed. No screen content is read or sent." : "Activity awareness is off. I cannot see your screen.");
+        return;
+      }
+      if (consentAnswer === "decline" || consentAnswer === "expired") {
+        setReply("No change. Activity awareness stays off."); return;
+      }
+      const enable = awarenessRequest !== "disable" && consentAnswer === "accept" && current.phase === "running";
+      actionRunning.current = true; setBusy(true);
+      const epoch = ++awarenessEpoch.current;
+      const visibility = visibilityEpoch.current;
+      try {
+        const result = await companion.setAwareness(enable);
+        if (epoch === awarenessEpoch.current && !hiding.current) {
+          setAwareness(result); setCheckIn(null);
+          if (expandedRef.current && visibility === visibilityEpoch.current) setReply(result.enabled ? "Activity awareness is on. Close the bubble and carry on. Say stop watching to turn it off." : "Activity awareness is off.");
+        } else if (result.enabled) {
+          // A hide, move, or revocation superseded this in-flight enable request.
+          await companion.setAwareness(false);
+        }
+      } catch (failure) {
+        if (expandedRef.current && visibility === visibilityEpoch.current) setReply("I could not change activity awareness. " + String(failure));
+      } finally { actionRunning.current = false; setBusy(false); }
+      return;
+    }
     if (/^(?:forget (?:this|our) conversation|clear (?:the |our )?conversation|forget our chat)[.!?]*$/i.test(userMessage)) {
       history.current = [];
       clearConversation();
@@ -420,12 +528,12 @@ function CompanionApp() {
       }
       switch (plan.action) {
         case "start": data = await companion.start(plan.goal ?? "Focus together", "Continue the chosen task"); break;
-        case "pause": data = await companion.pause(); break;
+        case "pause": data = await companion.pause(); clearAwareness(); break;
         // The older automatic return-cue policy remains in Rust but isn't
         // invoked here. Conversation is requested by the user, not a prompt.
         case "resume": data = await companion.resume(); break;
-        case "finish": data = await companion.finish(); break;
-        case "quiet": data = await companion.setSupportMode("quiet"); break;
+        case "finish": data = await companion.finish(); clearAwareness(); break;
+        case "quiet": data = await companion.setSupportMode("quiet"); clearAwareness(); break;
         case "hide":
           // Hiding never finishes or deletes a session. Menu bar recreates it.
           await hideOverlay();
@@ -463,8 +571,8 @@ function CompanionApp() {
   }, [expanded, resizing]);
 
   const phase = current?.phase ?? "idle";
-  const behaviour = reaction ?? (expanded ? "attentive" : restingBehaviour(phase));
-  const phaseName = phase === "running" ? "Working together" : phase === "paused" ? "On a break" : "Here with you";
+  const behaviour = checkIn && !expanded ? "attentive" : reaction ?? (expanded ? "attentive" : restingBehaviour(phase));
+  const phaseName = awareness?.enabled && phase === "running" ? (checkIn ? "Check-in · aware" : "Working · aware") : phase === "running" ? "Working together" : phase === "paused" ? "On a break" : "Here with you";
 
   return (
     <main className={`overlay ${expanded ? "is-expanded" : "is-compact"} ${dragging ? "is-dragging" : ""}`}>
@@ -502,13 +610,13 @@ function CompanionApp() {
           </p>
           <form className="conversation-form" onSubmit={(event) => { event.preventDefault(); void sendMessage(); }}>
             <input aria-label="Type to Oplyra" value={message} maxLength={300}
-              placeholder={pendingAction.current ? "Yes or no…" : "Say something…"} disabled={!ready || !current || busy}
+              placeholder={pendingAction.current || awarenessPending.current !== null ? "Yes or no…" : "Say something…"} disabled={!ready || !current || busy}
               onChange={(event) => setMessage(event.target.value)} />
             <button type="submit" aria-label="Send message" disabled={busy || !ready || !current || !message.trim()}>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
             </button>
           </form>
-          <p className="conversation-note">{pendingAction.current ? "Reply yes or no · no change yet" : source === "local" || source === "deepseek" || source === "groq" ? `${source === "groq" ? "GPT-OSS-120B · Groq" : source === "deepseek" ? "DeepSeek · online" : activeModel ?? "Local AI"} · ${((latency ?? 0) / 1000).toFixed(1)} s` : source === "fallback" ? aiNotice || "AI unavailable · basic response" : provider === "groq" ? "Groq online · chat and session context sent" : provider === "deepseek" ? "DeepSeek online · chat and session context sent" : provider === "local" ? "On-device · Talk to Oplyra." : "AI provider loading…"} </p>
+          <p className="conversation-note">{awarenessPending.current !== null ? "Reply yes or no · awareness is off" : pendingAction.current ? "Reply yes or no · no change yet" : source === "local" || source === "deepseek" || source === "groq" ? `${source === "groq" ? "GPT-OSS-120B · Groq" : source === "deepseek" ? "DeepSeek · online" : activeModel ?? "Local AI"} · ${((latency ?? 0) / 1000).toFixed(1)} s` : source === "fallback" ? aiNotice || "AI unavailable · basic response" : provider === "groq" ? "Groq online · chat and session context sent" : provider === "deepseek" ? "DeepSeek online · chat and session context sent" : provider === "local" ? "On-device · Talk to Oplyra." : "AI provider loading…"} </p>
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
       )}

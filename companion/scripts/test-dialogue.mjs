@@ -7,7 +7,7 @@ const input = await readFile(new URL("../src/dialogue.ts", import.meta.url), "ut
 const { outputText } = ts.transpileModule(input, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
 });
-const { planMessage, restingBehaviour, actionAllowed, confirmedPlan, resolveConfirmation, proposalQuestion, rememberTurn } = await import("data:text/javascript;base64," + Buffer.from(outputText).toString("base64"));
+const { planMessage, restingBehaviour, actionAllowed, confirmedPlan, resolveConfirmation, proposalQuestion, rememberTurn, awarenessCommand } = await import("data:text/javascript;base64," + Buffer.from(outputText).toString("base64"));
 const cases = [
   ["Let's study together.", "idle", "start", "working"],
   ["I need to work on my paper", "idle", "start", "working"],
@@ -80,3 +80,9 @@ assert.equal(memory[3].reply,"reply 5");
 assert.equal(rememberTurn(memory,"", "response").length,4);
 assert.equal(Array.from(rememberTurn([], "x".repeat(301), "ok")[0].user).length,300);
 console.log("Bounded conversation memory assertions passed.");
+
+assert.equal(awarenessCommand("Watch my activity."), "enable");
+assert.equal(awarenessCommand("Stop watching"), "disable");
+assert.equal(awarenessCommand("What can you see?"), "status");
+for (const text of ["Don't watch my activity", "Should I watch my activity?", "watch my activity and finish", '"watch my activity"']) assert.equal(awarenessCommand(text), null);
+console.log("Local awareness consent command assertions passed.");
