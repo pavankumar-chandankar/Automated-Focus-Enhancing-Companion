@@ -109,11 +109,14 @@ fn reset_cue_preference(store: State<'_, SessionStore>) -> Result<SessionSnapsho
     store.mutate(|session, _now| { session.policy.reset_preference(); Ok(()) })
 }
 
-// The model can produce a display-only reply, never a native action.
 #[tauri::command]
-async fn local_companion_reply(store: State<'_, SessionStore>, message: String, previous: Option<intelligence::PreviousTurn>) -> Result<intelligence::ModelReply, String> {
-    let phase = store.snapshot()?.phase;
-    tauri::async_runtime::spawn_blocking(move || intelligence::generate(&message, phase, previous.as_ref()))
+fn intelligence_provider() -> Result<intelligence::Provider, String> { intelligence::configured_provider() }
+
+// Model output is a reply or a bounded proposal, never a native action.
+#[tauri::command]
+async fn local_companion_reply(store: State<'_, SessionStore>, message: String, history: Vec<intelligence::PreviousTurn>) -> Result<intelligence::ModelReply, String> {
+    let snapshot = store.snapshot()?;
+    tauri::async_runtime::spawn_blocking(move || intelligence::generate(&message, &snapshot, &history))
         .await.map_err(|_| "Local intelligence worker failed".to_owned())?
 }
 
@@ -207,7 +210,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_snapshot, start_session, pause_session, resume_session, finish_session,
             save_next_step, set_quiet_mode, resume_with_assistance, set_support_mode,
-            record_cue_feedback, reset_cue_preference, local_companion_reply, begin_companion_drag,
+            record_cue_feedback, reset_cue_preference, local_companion_reply, intelligence_provider, begin_companion_drag,
             finish_companion_drag, cancel_companion_drag,
             overlay::load_overlay_draft, overlay::hide_companion
         ])
