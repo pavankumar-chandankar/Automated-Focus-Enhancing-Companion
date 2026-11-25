@@ -2,7 +2,7 @@ import type { Phase } from "./native";
 
 export type Behaviour = "available" | "working" | "resting" | "attentive" | "encouraging" | "celebrating";
 export type Action = "none" | "start" | "pause" | "resume" | "finish" | "quiet";
-export type Plan = { action: Action; reply: string; behaviour: Behaviour; goal?: string };
+export type Plan = { action: Action; reply: string; behaviour: Behaviour; goal?: string; useModel?: boolean };
 
 export function restingBehaviour(phase: Phase): Behaviour {
   return phase === "running" ? "working" : phase === "paused" ? "resting" : "available";
@@ -15,6 +15,7 @@ export function planMessage(input: string, phase: Phase): Plan {
   const text = raw.toLowerCase().replace(/[’‘]/g, "'").replace(/[.!?]+$/, "").trim().replace(/\s+/g, " ");
   const reply = (message: string, behaviour: Behaviour = "attentive", action: Action = "none"): Plan =>
     ({ reply: message, behaviour, action });
+  const conversational = (message: string, behaviour: Behaviour = "attentive"): Plan => ({ ...reply(message, behaviour), useModel: true });
   if (!text) return reply("You can tell me when you're ready.");
   // This companion is not a mental-health service. Never turn explicit danger
   // into a productivity nudge or an invitation to depend on the character.
@@ -39,16 +40,16 @@ export function planMessage(input: string, phase: Phase): Plan {
     return reply("Ready when you are. Say “let's focus” to begin.");
   }
   if (/^(?:i(?:'m| am) (?:getting )?distracted|i can't focus|i keep getting distracted|i lost focus|i'm struggling to focus|i(?:'m| am) procrastinating)$/.test(text)) {
-    return reply("How about coming back to just one small step?", "encouraging");
+    return conversational("How about coming back to just one small step?", "encouraging");
   }
   if (/^(?:i(?:'m| am) (?:tired|stressed|overwhelmed|frustrated)|this is hard|i need encouragement|encourage me|motivate me|i don't feel like working)$/.test(text)) {
-    return reply("It's okay to slow down. One small step or a break is enough for now.", "encouraging");
+    return conversational("It's okay to slow down. One small step or a break is enough for now.", "encouraging");
   }
   if (/^(?:thanks|thank you|that helped|good job|nice)$/.test(text)) {
-    return reply("You're welcome.", "attentive");
+    return conversational("You're welcome.", "attentive");
   }
   if (/^(?:hi|hello|hey|hey oplyra|hello oplyra)$/.test(text)) {
-    return reply("Hey. Ready whenever you are.");
+    return conversational("Hey. Ready whenever you are.");
   }
   if (/^(?:what can you do|help|how do you work)$/.test(text)) {
     return reply("I'm a focus companion. Try “let's focus”, “I'm distracted”, “I need a break” or “I'm done”.");
@@ -66,5 +67,5 @@ export function planMessage(input: string, phase: Phase): Plan {
     return { action: "start", goal, reply: "Let's begin. I'll keep you company.", behaviour: "working" };
   }
   // Do not pretend to understand arbitrary prompts or answer research questions.
-  return reply("I'm here for focus and company. Try “let's focus”, “I'm distracted” or “I need a break”.");
+  return conversational("I'm here for focus and company. Try “let's focus”, “I'm distracted” or “I need a break”.");
 }

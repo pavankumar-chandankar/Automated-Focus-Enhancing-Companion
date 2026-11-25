@@ -1,5 +1,6 @@
 mod model;
 mod policy;
+mod intelligence;
 use policy::{Feedback, SupportMode};
 
 use std::{fs, path::PathBuf, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
@@ -107,6 +108,14 @@ fn reset_cue_preference(store: State<'_, SessionStore>) -> Result<SessionSnapsho
     store.mutate(|session, _now| { session.policy.reset_preference(); Ok(()) })
 }
 
+// The model can produce a display-only reply, never a native action.
+#[tauri::command]
+async fn local_companion_reply(store: State<'_, SessionStore>, message: String, previous: Option<intelligence::PreviousTurn>) -> Result<intelligence::ModelReply, String> {
+    let phase = store.snapshot()?.phase;
+    tauri::async_runtime::spawn_blocking(move || intelligence::generate(&message, phase, previous.as_ref()))
+        .await.map_err(|_| "Local intelligence worker failed".to_owned())?
+}
+
 // The bin is a separate 112x112 logical-pixel surface, shown *only* while
 // the user intentionally holds and drags the companion. No fullscreen layer.
 #[tauri::command]
@@ -202,7 +211,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_snapshot, start_session, pause_session, resume_session, finish_session,
             save_next_step, set_quiet_mode, resume_with_assistance, set_support_mode,
-            record_cue_feedback, reset_cue_preference, begin_companion_drag,
+            record_cue_feedback, reset_cue_preference, local_companion_reply, begin_companion_drag,
             finish_companion_drag, cancel_companion_drag
         ])
         .run(tauri::generate_context!())

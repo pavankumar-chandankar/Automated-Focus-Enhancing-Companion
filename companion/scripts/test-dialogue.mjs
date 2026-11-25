@@ -39,3 +39,11 @@ assert.equal(restingBehaviour("running"), "working");
 assert.equal(restingBehaviour("paused"), "resting");
 assert.equal(restingBehaviour("idle"), "available");
 console.log("23 dialogue and behaviour assertions/cases passed.");
+
+// Free-form dialogue can reach the model; commands and explicit crisis phrases cannot.
+assert.equal(planMessage("My mind keeps wandering today", "running").useModel, true);
+assert.equal(planMessage("I'm distracted", "running").useModel, true);
+assert.equal(planMessage("Pause", "running").useModel, undefined);
+assert.equal(planMessage("I want to kill myself", "running").useModel, undefined);
+assert.equal(planMessage("Don't interrupt me", "running").useModel, undefined);
+console.log("5 model-routing assertions passed.");

@@ -29,3 +29,7 @@ npm run tauri dev
 ## Acceptance gates
 
 Test launch, click open/close, instant drag, drop-to-hide and restore on the M1. Verify start/break/return/finish and a restored v0.5 session. Verify unknown input does not execute a session action; closing the bubble clears dialogue. Keep network disconnected after dependency installation and confirm all functions work. Measure the packaged app (including WebKit subprocesses); low energy/RAM is a goal, not a verified result. Screen-aware placement, optional microphone/voice, consent-scoped sensing, adaptive encouragement, delete/export and signed distribution are unfinished. Adults-only formative testing.
+
+## v0.7 local AI experiment
+
+See [LOCAL_AI_V07.md](LOCAL_AI_V07.md) for installing the optional local model, its constraints and the test protocol. The model generates short supportive replies for free-form input. Session commands are deterministic; the scripted fallback remains when the model is unavailable. No cloud provider is configured.
