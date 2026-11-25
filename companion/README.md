@@ -41,3 +41,7 @@ See [FUNCTIONAL_INTELLIGENCE_V08.md](FUNCTIONAL_INTELLIGENCE_V08.md). The langua
 ## v0.8.1 menu-bar lifecycle and draft preservation
 
 See [OVERLAY_LIFECYCLE_V081.md](OVERLAY_LIFECYCLE_V081.md). The drop target is created on demand and destroyed after dragging; hiding destroys the companion window and leaves only the tray process. macOS accessory activation and LSUIElement remove conventional application presence. Unsent drafts survive moving, folding and tray restoration in RAM until quit.
+
+## v0.9 contextual intelligence
+
+See [CONTEXTUAL_INTELLIGENCE_V09.md](CONTEXTUAL_INTELLIGENCE_V09.md). The default local provider and explicit experimental DeepSeek cloud provider share a versioned personality prompt, current native session facts, four recent exchanges and the existing confirmed action protocol. No cloud requests without explicit launch configuration. No screen data or microphone access.

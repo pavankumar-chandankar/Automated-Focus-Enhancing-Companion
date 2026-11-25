@@ -7,7 +7,7 @@ const input = await readFile(new URL("../src/dialogue.ts", import.meta.url), "ut
 const { outputText } = ts.transpileModule(input, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
 });
-const { planMessage, restingBehaviour, actionAllowed, confirmedPlan, resolveConfirmation, proposalQuestion } = await import("data:text/javascript;base64," + Buffer.from(outputText).toString("base64"));
+const { planMessage, restingBehaviour, actionAllowed, confirmedPlan, resolveConfirmation, proposalQuestion, rememberTurn } = await import("data:text/javascript;base64," + Buffer.from(outputText).toString("base64"));
 const cases = [
   ["Let's study together.", "idle", "start", "working"],
   ["I need to work on my paper", "idle", "start", "working"],
@@ -71,3 +71,12 @@ assert.equal(confirmedPlan("pause", "running").behaviour, "resting");
 assert.equal(confirmedPlan("start", "idle").goal, "Focus together");
 assert.match(proposalQuestion("pause"), /pause/);
 console.log("Functional intent and confirmation regression assertions passed.");
+
+let memory = [];
+for (let i=0;i<6;i++) memory = rememberTurn(memory, "message "+i, "reply "+i);
+assert.equal(memory.length,4);
+assert.equal(memory[0].user,"message 2");
+assert.equal(memory[3].reply,"reply 5");
+assert.equal(rememberTurn(memory,"", "response").length,4);
+assert.equal(Array.from(rememberTurn([], "x".repeat(301), "ok")[0].user).length,300);
+console.log("Bounded conversation memory assertions passed.");

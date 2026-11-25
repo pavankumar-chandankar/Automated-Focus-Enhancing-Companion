@@ -19,10 +19,12 @@ export interface SessionSnapshot {
 }
 
 export type PreviousTurn = { user: string; reply: string };
-export type ModelReply = { reply: string; reaction: "attentive" | "encouraging"; latency_ms: number; proposal: import("./dialogue").Intent | null };
+export type Provider = "local" | "deepseek" | "groq";
+export type ModelReply = { provider: Provider; model: string; reply: string; reaction: "attentive" | "encouraging"; latency_ms: number; proposal: import("./dialogue").Intent | null };
 
 export const companion = {
-  localReply: (message: string, previous: PreviousTurn | null) => invoke<ModelReply>("local_companion_reply", { message, previous }),
+  provider: () => invoke<Provider>("intelligence_provider"),
+  localReply: (message: string, history: PreviousTurn[]) => invoke<ModelReply>("local_companion_reply", { message, history }),
   snapshot: () => invoke<SessionSnapshot>("get_snapshot"),
   start: (goal: string, nextStep: string) =>
     invoke<SessionSnapshot>("start_session", { goal, nextStep }),

@@ -1,4 +1,12 @@
-import type { Phase } from "./native";
+import type { Phase, PreviousTurn } from "./native";
+
+// Four recent completed exchanges. No disk transcript; newest turns win.
+export function rememberTurn(history: PreviousTurn[], user: string, reply: string): PreviousTurn[] {
+  const bound = (s: string) => Array.from(s.trim().replace(/[\x00-\x09\x0b-\x1f\x7f]/g, " ")).slice(0, 300).join("");
+  const turn = { user: bound(user), reply: bound(reply) };
+  if (!turn.user || !turn.reply) return history.slice(-4);
+  return [...history, turn].slice(-4);
+}
 
 export type Behaviour = "available" | "working" | "resting" | "attentive" | "encouraging" | "celebrating";
 export type Intent = "start" | "pause" | "resume" | "finish" | "quiet" | "hide";

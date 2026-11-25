@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { companion, type Phase, type SessionSnapshot, type PreviousTurn } from "./native";
-import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQuestion, resolveConfirmation, type Behaviour, type PendingAction } from "./dialogue";
+import { companion, type Phase, type SessionSnapshot, type PreviousTurn, type Provider } from "./native";
+import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQuestion, resolveConfirmation, rememberTurn, type Behaviour, type PendingAction } from "./dialogue";
 
 // Logical pixels. The visible native surface shrinks to the character when closed;
 // it is never a conventional full-window application.
@@ -105,10 +105,13 @@ function CompanionApp() {
     setMessageState(value);
   }
   const [reply, setReply] = useState("");
-  const [source, setSource] = useState<"local" | "fallback" | "command" | null>(null);
-  const previousTurn = useRef<PreviousTurn | null>(null);
+  const [source, setSource] = useState<Provider | "fallback" | "command" | null>(null);
+  const [provider, setProvider] = useState<Provider | null>(null);
+  const history = useRef<PreviousTurn[]>([]);
   const pendingAction = useRef<PendingAction | null>(null);
   const [latency, setLatency] = useState<number | null>(null);
+  const [activeModel, setActiveModel] = useState<string | null>(null);
+  const [aiNotice, setAiNotice] = useState("");
   const [reaction, setReaction] = useState<Behaviour | null>(null);
   const expandedRef = useRef(false);
   const visibilityEpoch = useRef(0);
@@ -118,6 +121,7 @@ function CompanionApp() {
   useEffect(() => {
     let active = true;
     // Draft hydration happens after registering the native hide listener below.
+    void companion.provider().then(value => { if (active) setProvider(value); }).catch(failure => { if (active) setError(String(failure)); });
     void companion.snapshot().then((data) => {
       if (active) setCurrent(data);
     }).catch((e: unknown) => { if (active) setError(String(e)); });
@@ -126,7 +130,7 @@ function CompanionApp() {
 
   function clearConversation() {
     pendingAction.current = null;
-    previousTurn.current = null;
+    // Folding the bubble does not erase conversational context.
     setReply("");
     setReaction(null);
     // Closing or moving a bubble must never discard unsent input.
@@ -329,19 +333,28 @@ function CompanionApp() {
   async function sendMessage() {
     if (actionRunning.current || hiding.current || !current || !message.trim()) return;
     const userMessage = message.trim();
+    if (/^(?:forget (?:this|our) conversation|clear (?:the |our )?conversation|forget our chat)[.!?]*$/i.test(userMessage)) {
+      history.current = [];
+      clearConversation();
+      setMessage("");
+      setReply("I cleared our recent chat. Your focus session is unchanged.");
+      setSource("command");
+      return;
+    }
     const pending = pendingAction.current;
     pendingAction.current = null;
     const outcome = resolveConfirmation(userMessage, pending, current.phase, performance.now());
     if (outcome === "decline") {
       setMessage(""); setReply("Okay, no change."); setReaction(restingBehaviour(current.phase));
-      setSource("command"); setLatency(null); previousTurn.current = null;
+      setSource("command"); setLatency(null);
+      history.current = rememberTurn(history.current, userMessage, "Okay, no change.");
       return;
     }
     const confirmationWord = /^(?:yes|yes please|yes, please|sure|go ahead|do it|okay|ok|confirm|no|no thanks|no, thanks|not now|cancel|never mind|nevermind)[.!?]*$/i.test(userMessage);
-    if (confirmationWord && outcome !== "accept") {
+    if (confirmationWord && outcome !== "accept" && pending) {
       setMessage(""); setReply(pending ? "That request is no longer active. Tell me what you'd like to do." : "Tell me what you'd like to do.");
       setReaction(restingBehaviour(current.phase)); setSource("command"); setLatency(null);
-      previousTurn.current = null;
+      history.current = rememberTurn(history.current, userMessage, "That request is no longer active.");
       return;
     }
     const plan = outcome === "accept" && pending
@@ -361,42 +374,47 @@ function CompanionApp() {
         setReply("Thinking…");
         setReaction("attentive");
         try {
-          const generated = await companion.localReply(userMessage, previousTurn.current);
+          const generated = await companion.localReply(userMessage, history.current);
           if (expandedRef.current && visibility === visibilityEpoch.current) {
-            setSource("local");
+            setAiNotice("");
+            setSource(generated.provider);
+            setActiveModel(generated.model);
             setLatency(generated.latency_ms);
             if (generated.proposal) {
               // No model-generated instruction is executed. A proposal is a
               // short-lived question tied to this state and visible conversation.
               const normalized = userMessage.toLowerCase().replace(/[’‘]/g, "'");
               const ambiguous = /["“”]|(?:^|\s)(?:don't|do not|not|never|unless|what if|should i|hypothetically|but|instead)(?:\s|[.,?!]|$)/.test(normalized);
-              if (!ambiguous && actionAllowed(generated.proposal, current.phase)) {
+              if (!ambiguous && !confirmationWord && actionAllowed(generated.proposal, current.phase)) {
                 pendingAction.current = { action: generated.proposal, phase: current.phase, expiresAt: performance.now() + 60_000 };
-                setReply(proposalQuestion(generated.proposal));
+                const question = proposalQuestion(generated.proposal);
+                setReply(question);
+                history.current = rememberTurn(history.current, userMessage, question);
               } else {
-                setReply("I haven't changed our session. Tell me directly if you'd like to change it.");
+                const clarification = "I haven't changed our session. Tell me directly if you'd like to change it.";
+                setReply(clarification);
+                history.current = rememberTurn(history.current, userMessage, clarification);
               }
               setReaction("attentive");
-              previousTurn.current = null;
             } else {
               setReply(generated.reply);
               setReaction(plan.behaviour === "encouraging" ? "encouraging" : generated.reaction);
-              previousTurn.current = { user: userMessage, reply: generated.reply };
+              history.current = rememberTurn(history.current, userMessage, generated.reply);
             }
           }
         } catch (failure) {
           // Native provider errors contain no message content; keep diagnostics local.
-          console.warn("Local AI request failed:", String(failure));
+          console.warn("AI request failed:", String(failure));
           if (expandedRef.current && visibility === visibilityEpoch.current) {
             setReply(plan.reply);
             setReaction(plan.behaviour);
             setSource("fallback");
-            previousTurn.current = null;
+            setAiNotice(String(failure).includes("Groq rate limit") ? "Groq limit reached · try later" : String(failure).includes("Groq API key missing") ? "Groq API key missing" : "AI unavailable · basic response");
+            history.current = rememberTurn(history.current, userMessage, plan.reply);
           }
         }
         return;
       }
-      previousTurn.current = null;
       if (plan.action !== "none" && !actionAllowed(plan.action, current.phase)) {
         throw new Error("This action is not available in the current session");
       }
@@ -415,6 +433,8 @@ function CompanionApp() {
         case "none": break;
       }
       setCurrent(data);
+      // Record only the reply after native success; do not claim a failed action.
+      if (plan.reply) history.current = rememberTurn(history.current, userMessage, plan.reply);
       if (expandedRef.current && visibility === visibilityEpoch.current) {
         setReply(plan.reply);
         setReaction(plan.behaviour);
@@ -488,7 +508,7 @@ function CompanionApp() {
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
             </button>
           </form>
-          <p className="conversation-note">{pendingAction.current ? "Reply yes or no · no change yet" : source === "local" ? `Local AI · ${((latency ?? 0) / 1000).toFixed(1)} s` : source === "fallback" ? "Local AI unavailable · basic response" : source === "command" ? "Local companion" : "Private by design · Talk to Oplyra."}</p>
+          <p className="conversation-note">{pendingAction.current ? "Reply yes or no · no change yet" : source === "local" || source === "deepseek" || source === "groq" ? `${source === "groq" ? "GPT-OSS-120B · Groq" : source === "deepseek" ? "DeepSeek · online" : activeModel ?? "Local AI"} · ${((latency ?? 0) / 1000).toFixed(1)} s` : source === "fallback" ? aiNotice || "AI unavailable · basic response" : provider === "groq" ? "Groq online · chat and session context sent" : provider === "deepseek" ? "DeepSeek online · chat and session context sent" : provider === "local" ? "On-device · Talk to Oplyra." : "AI provider loading…"} </p>
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
       )}
