@@ -20,7 +20,7 @@ npm run tauri dev
 ## Implementation
 - Known explicit start/pause/resume/end/quiet commands retain deterministic session semantics. Emotional statements and unfamiliar phrases route to the local language model. Explicit recognized crisis phrases bypass the model. This limited check is not a robust safety classifier.
 - The Rust provider sends the message, phase and at most one previous successful conversational turn to the fixed 127.0.0.1 Ollama endpoint. No screen data, goal text, system data, tools, network proxy or redirects. No app transcript is persisted. Previous turn is cleared on close, drag or a deterministic command. Ollama's own runtime is a separate process, not under Oplyra's full control.
-- Structured output must contain only bounded reply text and an allowed reaction. Model cannot invoke commands. Prompt constraints do not guarantee safe or correct responses; adult-only evaluation is required. No cloud fallback.
+- Plain-text output is bounded and validated; no JSON grammar is requested, because some Homebrew MLX builds lack xgrammar. Character reactions come from trusted application logic. Model cannot invoke commands. Prompt constraints do not guarantee safe or correct responses; adult-only evaluation is required. No cloud fallback.
 - The request uses 2048 context tokens, at most 120 generated tokens, thinking off, keep_alive=0 (request model unload after reply), a 45-second timeout and one in-flight request. Closing the bubble discards the reply, not the in-flight computation. This trades cold-start latency against idle RAM.
 - Model source and end-to-end response latency are shown in small text. If unavailable, malformed or timed out, basic deterministic dialogue remains available. No prompts run in the background.
 
@@ -33,3 +33,7 @@ npm run tauri dev
 
 ## Future provider strategy
 The native inference function is isolated from dialogue routing and session policy. A hosted provider may be added after evaluation, with an explicit opt-in and separate secret handling; never silently send local prompts or future screen content off-device. Offline availability remains desirable but is not a release blocker. Voice, optional screen awareness and automatic intervention are not included here.
+
+## v0.7.1 compatibility fix
+
+If Ollama logs `Structured output is unavailable` / `501 Not Implemented`, use this revision. It removes the grammar-dependent `format` field entirely. No model re-download is needed. A bare warning about a missing xgrammar library may still appear during model initialization; verify that `/api/chat` returns HTTP 200. If basic chat also fails, inspect the server log and test with `ollama run qwen3.5:0.8b`. Never add a cloud fallback without consent.

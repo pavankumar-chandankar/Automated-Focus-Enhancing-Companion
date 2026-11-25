@@ -282,12 +282,14 @@ function CompanionApp() {
           const generated = await companion.localReply(userMessage, previousTurn.current);
           if (expandedRef.current && visibility === visibilityEpoch.current) {
             setReply(generated.reply);
-            setReaction(generated.reaction);
+            setReaction(plan.behaviour === "encouraging" ? "encouraging" : generated.reaction);
             setSource("local");
             setLatency(generated.latency_ms);
             previousTurn.current = { user: userMessage, reply: generated.reply };
           }
-        } catch {
+        } catch (failure) {
+          // Native provider errors contain no message content; keep diagnostics local.
+          console.warn("Local AI request failed:", String(failure));
           if (expandedRef.current && visibility === visibilityEpoch.current) {
             setReply(plan.reply);
             setReaction(plan.behaviour);
