@@ -8,6 +8,15 @@ export function rememberTurn(history: PreviousTurn[], user: string, reply: strin
   return [...history, turn].slice(-4);
 }
 
+// Consent commands stay local, never become AI proposals or enter chat history.
+export function awarenessCommand(input: string): "enable" | "disable" | "status" | null {
+  const text = input.trim().toLowerCase().replace(/[’‘]/g, "'").replace(/[.!?]+$/, "").trim().replace(/\s+/g, " ");
+  if (/^(?:watch my activity|follow my activity|enable activity awareness|help me stay on track|watch for distractions)$/.test(text)) return "enable";
+  if (/^(?:stop watching|stop watching my activity|stop activity awareness|disable activity awareness|stop observing|stop monitoring)$/.test(text)) return "disable";
+  if (/^(?:what can you see|what are you watching|activity awareness status|are you watching my activity)$/.test(text)) return "status";
+  return null;
+}
+
 export type Behaviour = "available" | "working" | "resting" | "attentive" | "encouraging" | "celebrating";
 export type Intent = "start" | "pause" | "resume" | "finish" | "quiet" | "hide";
 export type Action = "none" | Intent;

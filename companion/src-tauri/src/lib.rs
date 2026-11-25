@@ -2,6 +2,7 @@ mod model;
 mod policy;
 mod intelligence;
 mod overlay;
+mod awareness;
 use policy::{Feedback, SupportMode};
 
 use std::{fs, path::PathBuf, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
@@ -60,13 +61,17 @@ impl SessionStore {
 fn get_snapshot(store: State<'_, SessionStore>) -> Result<SessionSnapshot, String> { store.snapshot() }
 
 #[tauri::command]
-fn start_session(store: State<'_, SessionStore>, goal: String, next_step: String) -> Result<SessionSnapshot, String> {
-    store.mutate(|session, now| session.start(&goal, &next_step, now))
+fn start_session(app: tauri::AppHandle, store: State<'_, SessionStore>, goal: String, next_step: String) -> Result<SessionSnapshot, String> {
+    let result = store.mutate(|session, now| session.start(&goal, &next_step, now));
+    if result.is_ok() { awareness::stop(&app); }
+    result
 }
 
 #[tauri::command]
-fn pause_session(store: State<'_, SessionStore>) -> Result<SessionSnapshot, String> {
-    store.mutate(|session, now| session.pause(now))
+fn pause_session(app: tauri::AppHandle, store: State<'_, SessionStore>) -> Result<SessionSnapshot, String> {
+    let result = store.mutate(|session, now| session.pause(now));
+    if result.is_ok() { awareness::stop(&app); }
+    result
 }
 
 #[tauri::command]
@@ -75,8 +80,10 @@ fn resume_session(store: State<'_, SessionStore>) -> Result<SessionSnapshot, Str
 }
 
 #[tauri::command]
-fn finish_session(store: State<'_, SessionStore>) -> Result<SessionSnapshot, String> {
-    store.mutate(|session, now| session.finish(now))
+fn finish_session(app: tauri::AppHandle, store: State<'_, SessionStore>) -> Result<SessionSnapshot, String> {
+    let result = store.mutate(|session, now| session.finish(now));
+    if result.is_ok() { awareness::stop(&app); }
+    result
 }
 
 #[tauri::command]
@@ -85,8 +92,10 @@ fn save_next_step(store: State<'_, SessionStore>, next_step: String) -> Result<S
 }
 
 #[tauri::command]
-fn set_quiet_mode(store: State<'_, SessionStore>, enabled: bool) -> Result<SessionSnapshot, String> {
-    store.mutate(|session, _now| { session.set_support_mode(if enabled { SupportMode::Quiet } else { SupportMode::Balanced }); Ok(()) })
+fn set_quiet_mode(app: tauri::AppHandle, store: State<'_, SessionStore>, enabled: bool) -> Result<SessionSnapshot, String> {
+    let result = store.mutate(|session, _now| { session.set_support_mode(if enabled { SupportMode::Quiet } else { SupportMode::Balanced }); Ok(()) });
+    if enabled && result.is_ok() { awareness::stop(&app); }
+    result
 }
 
 #[tauri::command]
@@ -95,8 +104,10 @@ fn resume_with_assistance(store: State<'_, SessionStore>) -> Result<SessionSnaps
 }
 
 #[tauri::command]
-fn set_support_mode(store: State<'_, SessionStore>, mode: SupportMode) -> Result<SessionSnapshot, String> {
-    store.mutate(|session, _now| { session.set_support_mode(mode); Ok(()) })
+fn set_support_mode(app: tauri::AppHandle, store: State<'_, SessionStore>, mode: SupportMode) -> Result<SessionSnapshot, String> {
+    let result = store.mutate(|session, _now| { session.set_support_mode(mode); Ok(()) });
+    if mode == SupportMode::Quiet && result.is_ok() { awareness::stop(&app); }
+    result
 }
 
 #[tauri::command]
@@ -178,13 +189,15 @@ pub fn run() {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
             app.manage(overlay::OverlayState::default());
+            app.manage(awareness::AwarenessState::default());
             let path = app.path().app_local_data_dir()?.join("session.json");
             let store = SessionStore::read(path).map_err(std::io::Error::other)?;
             app.manage(store);
             let show = MenuItem::with_id(app, "show", "Show Oplyra", true, None::<&str>)?;
             let hide = MenuItem::with_id(app, "hide", "Hide Oplyra", true, None::<&str>)?;
+            let stop_awareness = MenuItem::with_id(app, "stop-awareness", "Stop activity awareness", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &hide, &stop_awareness, &quit])?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("app icon").clone())
                 .tooltip("Oplyra")
@@ -193,6 +206,7 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => overlay::request_show(app.clone()),
                     "hide" => overlay::request_hide(app),
+                    "stop-awareness" => awareness::stop(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -212,7 +226,8 @@ pub fn run() {
             save_next_step, set_quiet_mode, resume_with_assistance, set_support_mode,
             record_cue_feedback, reset_cue_preference, local_companion_reply, intelligence_provider, begin_companion_drag,
             finish_companion_drag, cancel_companion_drag,
-            overlay::load_overlay_draft, overlay::hide_companion
+            overlay::load_overlay_draft, overlay::hide_companion,
+            awareness::set_awareness, awareness::awareness_status, awareness::sample_awareness, awareness::suspend_awareness
         ])
         .build(tauri::generate_context!())
         .expect("error while building Oplyra desktop")
