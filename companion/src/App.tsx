@@ -3,7 +3,7 @@ import { getCurrentWindow, LogicalSize, PhysicalPosition } from "@tauri-apps/api
 import { invoke } from "@tauri-apps/api/core";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { companion, type Phase, type SessionSnapshot, type PreviousTurn } from "./native";
-import { planMessage, restingBehaviour, type Behaviour } from "./dialogue";
+import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQuestion, resolveConfirmation, type Behaviour, type PendingAction } from "./dialogue";
 
 // Logical pixels. The visible native surface shrinks to the character when closed;
 // it is never a conventional full-window application.
@@ -100,6 +100,7 @@ function CompanionApp() {
   const [reply, setReply] = useState("");
   const [source, setSource] = useState<"local" | "fallback" | "command" | null>(null);
   const previousTurn = useRef<PreviousTurn | null>(null);
+  const pendingAction = useRef<PendingAction | null>(null);
   const [latency, setLatency] = useState<number | null>(null);
   const [reaction, setReaction] = useState<Behaviour | null>(null);
   const expandedRef = useRef(false);
@@ -117,17 +118,46 @@ function CompanionApp() {
     return () => { active = false; };
   }, []);
 
+  function clearConversation() {
+    pendingAction.current = null;
+    previousTurn.current = null;
+    setReply("");
+    setReaction(null);
+    setMessage("");
+    setSource(null);
+    setLatency(null);
+  }
+
+  useEffect(() => {
+    // Tray/native hides also invalidate a pending confirmation, not only drag.
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void appWindow.listen("oplyra-hidden", () => {
+      if (disposed) return;
+      visibilityEpoch.current += 1;
+      expandedRef.current = false;
+      setExpanded(false);
+      clearConversation();
+      void appWindow.setSize(COMPACT).catch(() => {});
+    }).then(unlisten => {
+      if (disposed) unlisten();
+      else cleanup = unlisten;
+    }).catch(() => {});
+    return () => { disposed = true; cleanup?.(); };
+  }, []);
+
   async function toggleDetails(open: boolean) {
     if (resizing) return;
     setResizing(true);
     setError("");
+    if (!open) { visibilityEpoch.current += 1; pendingAction.current = null; }
     try {
       // The hit-test region grows only when the user explicitly opens controls.
       await appWindow.setSize(open ? OPEN : COMPACT);
       expandedRef.current = open;
       visibilityEpoch.current += 1;
       setExpanded(open);
-      if (!open) { setReply(""); setReaction(null); setMessage(""); previousTurn.current = null; setSource(null); setLatency(null); }
+      if (!open) clearConversation();
     } catch (failure) { setError(`Could not resize companion: ${String(failure)}`); }
     finally { setResizing(false); }
   }
@@ -163,16 +193,13 @@ function CompanionApp() {
     // request was already started on pointerdown, to minimise perceived latency.
     try {
       if (expanded) {
+        pendingAction.current = null;
+        visibilityEpoch.current += 1;
         await appWindow.setSize(COMPACT);
         expandedRef.current = false;
         visibilityEpoch.current += 1;
         setExpanded(false);
-        setReply("");
-        setReaction(null);
-        setMessage("");
-        previousTurn.current = null;
-        setSource(null);
-        setLatency(null);
+        clearConversation();
       }
       await gesture.geometryPromise;
       if (!gesture.base) return; // No native coordinates: do not open an unusable bin.
@@ -265,7 +292,25 @@ function CompanionApp() {
   async function sendMessage() {
     if (actionRunning.current || !current || !message.trim()) return;
     const userMessage = message.trim();
-    const plan = planMessage(userMessage, current.phase);
+    const pending = pendingAction.current;
+    pendingAction.current = null;
+    const outcome = resolveConfirmation(userMessage, pending, current.phase, performance.now());
+    if (outcome === "decline") {
+      setMessage(""); setReply("Okay, no change."); setReaction(restingBehaviour(current.phase));
+      setSource("command"); setLatency(null); previousTurn.current = null;
+      return;
+    }
+    const confirmationWord = /^(?:yes|yes please|yes, please|sure|go ahead|do it|okay|ok|confirm|no|no thanks|no, thanks|not now|cancel|never mind|nevermind)[.!?]*$/i.test(userMessage);
+    if (confirmationWord && outcome !== "accept") {
+      setMessage(""); setReply(pending ? "That request is no longer active. Tell me what you'd like to do." : "Tell me what you'd like to do.");
+      setReaction(restingBehaviour(current.phase)); setSource("command"); setLatency(null);
+      previousTurn.current = null;
+      return;
+    }
+    const plan = outcome === "accept" && pending
+      ? confirmedPlan(pending.action, current.phase)
+      : planMessage(userMessage, current.phase);
+    if (!plan) return;
     actionRunning.current = true;
     const visibility = visibilityEpoch.current;
     setBusy(true);
@@ -281,11 +326,26 @@ function CompanionApp() {
         try {
           const generated = await companion.localReply(userMessage, previousTurn.current);
           if (expandedRef.current && visibility === visibilityEpoch.current) {
-            setReply(generated.reply);
-            setReaction(plan.behaviour === "encouraging" ? "encouraging" : generated.reaction);
             setSource("local");
             setLatency(generated.latency_ms);
-            previousTurn.current = { user: userMessage, reply: generated.reply };
+            if (generated.proposal) {
+              // No model-generated instruction is executed. A proposal is a
+              // short-lived question tied to this state and visible conversation.
+              const normalized = userMessage.toLowerCase().replace(/[’‘]/g, "'");
+              const ambiguous = /["“”]|(?:^|\s)(?:don't|do not|not|never|unless|what if|should i|hypothetically|but|instead)(?:\s|[.,?!]|$)/.test(normalized);
+              if (!ambiguous && actionAllowed(generated.proposal, current.phase)) {
+                pendingAction.current = { action: generated.proposal, phase: current.phase, expiresAt: performance.now() + 60_000 };
+                setReply(proposalQuestion(generated.proposal));
+              } else {
+                setReply("I haven't changed our session. Tell me directly if you'd like to change it.");
+              }
+              setReaction("attentive");
+              previousTurn.current = null;
+            } else {
+              setReply(generated.reply);
+              setReaction(plan.behaviour === "encouraging" ? "encouraging" : generated.reaction);
+              previousTurn.current = { user: userMessage, reply: generated.reply };
+            }
           }
         } catch (failure) {
           // Native provider errors contain no message content; keep diagnostics local.
@@ -300,6 +360,9 @@ function CompanionApp() {
         return;
       }
       previousTurn.current = null;
+      if (plan.action !== "none" && !actionAllowed(plan.action, current.phase)) {
+        throw new Error("This action is not available in the current session");
+      }
       switch (plan.action) {
         case "start": data = await companion.start(plan.goal ?? "Focus together", "Continue the chosen task"); break;
         case "pause": data = await companion.pause(); break;
@@ -308,6 +371,15 @@ function CompanionApp() {
         case "resume": data = await companion.resume(); break;
         case "finish": data = await companion.finish(); break;
         case "quiet": data = await companion.setSupportMode("quiet"); break;
+        case "hide":
+          // Hiding never finishes or deletes a session. Menu bar restores it.
+          await appWindow.setSize(COMPACT);
+          visibilityEpoch.current += 1;
+          expandedRef.current = false;
+          setExpanded(false);
+          clearConversation();
+          await appWindow.hide();
+          return;
         case "none": break;
       }
       setCurrent(data);
@@ -317,9 +389,13 @@ function CompanionApp() {
         setSource("command");
       }
     } catch (failure) {
-      setError(String(failure));
-      setReply("I couldn't complete that action. You can try again.");
-      setReaction(null);
+      if (expandedRef.current && visibility === visibilityEpoch.current) {
+        setError(String(failure));
+        setReply("I couldn't complete that action. You can try again.");
+        setReaction(null);
+      } else if (plan.action === "hide") {
+        setError("Could not hide Oplyra");
+      }
     } finally {
       actionRunning.current = false;
       setBusy(false);
@@ -374,13 +450,13 @@ function CompanionApp() {
           </p>
           <form className="conversation-form" onSubmit={(event) => { event.preventDefault(); void sendMessage(); }}>
             <input aria-label="Type to Oplyra" value={message} maxLength={300}
-              placeholder="Say something…" disabled={!ready || !current || busy}
+              placeholder={pendingAction.current ? "Yes or no…" : "Say something…"} disabled={!ready || !current || busy}
               onChange={(event) => setMessage(event.target.value)} />
             <button type="submit" aria-label="Send message" disabled={busy || !ready || !current || !message.trim()}>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
             </button>
           </form>
-          <p className="conversation-note">{source === "local" ? `Local AI · ${((latency ?? 0) / 1000).toFixed(1)} s` : source === "fallback" ? "Local AI unavailable · basic response" : source === "command" ? "Local companion" : "Private by design · Talk to Oplyra."}</p>
+          <p className="conversation-note">{pendingAction.current ? "Reply yes or no · no change yet" : source === "local" ? `Local AI · ${((latency ?? 0) / 1000).toFixed(1)} s` : source === "fallback" ? "Local AI unavailable · basic response" : source === "command" ? "Local companion" : "Private by design · Talk to Oplyra."}</p>
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
       )}

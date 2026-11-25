@@ -5,7 +5,7 @@ use policy::{Feedback, SupportMode};
 
 use std::{fs, path::PathBuf, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
 use model::{SessionModel, SessionSnapshot};
-use tauri::{Manager, PhysicalPosition, State, WindowEvent, menu::{Menu, MenuItem}, tray::TrayIconBuilder};
+use tauri::{Emitter, Manager, PhysicalPosition, State, WindowEvent, menu::{Menu, MenuItem}, tray::TrayIconBuilder};
 
 struct SessionStore {
     path: PathBuf,
@@ -192,6 +192,7 @@ pub fn run() {
                     "hide" => {
                         if let Some(bin) = app.get_webview_window("drop-zone") { let _ = bin.hide(); }
                         if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.emit("oplyra-hidden", ());
                             let _ = window.hide();
                         }
                     }
@@ -205,6 +206,7 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 // The companion continues running and can be reopened from the tray.
                 api.prevent_close();
+                if window.label() == "main" { let _ = window.emit("oplyra-hidden", ()); }
                 let _ = window.hide();
             }
         })

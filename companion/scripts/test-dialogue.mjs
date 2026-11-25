@@ -7,7 +7,7 @@ const input = await readFile(new URL("../src/dialogue.ts", import.meta.url), "ut
 const { outputText } = ts.transpileModule(input, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
 });
-const { planMessage, restingBehaviour } = await import("data:text/javascript;base64," + Buffer.from(outputText).toString("base64"));
+const { planMessage, restingBehaviour, actionAllowed, confirmedPlan, resolveConfirmation, proposalQuestion } = await import("data:text/javascript;base64," + Buffer.from(outputText).toString("base64"));
 const cases = [
   ["Let's study together.", "idle", "start", "working"],
   ["I need to work on my paper", "idle", "start", "working"],
@@ -47,3 +47,27 @@ assert.equal(planMessage("Pause", "running").useModel, undefined);
 assert.equal(planMessage("I want to kill myself", "running").useModel, undefined);
 assert.equal(planMessage("Don't interrupt me", "running").useModel, undefined);
 console.log("5 model-routing assertions passed.");
+
+assert.equal(planMessage("Pause the session I am taking a break", "running").action, "pause");
+assert.equal(planMessage("Pause the session, I am taking a break", "running").action, "pause");
+assert.equal(planMessage("I'm going to take a break", "running").action, "pause");
+assert.equal(planMessage("Alright, let's get going again", "paused").action, "resume");
+assert.equal(planMessage("I'm finished for today", "running").action, "finish");
+assert.equal(planMessage("Leave me alone for now", "running").action, "hide");
+for (const input of ["Don't pause the session", "Should I take a break?", "Pause and finish the session", "I am not taking a break", "I need to work on my paper but don't start"]) {
+  assert.equal(planMessage(input, "running").action, "none", input);
+  assert.equal(planMessage(input, "idle").action, "none", input);
+}
+const pending = {action:"pause", phase:"running", expiresAt:1000};
+assert.equal(resolveConfirmation("yes please", pending, "running", 999), "accept");
+assert.equal(resolveConfirmation("no thanks", pending, "running", 999), "decline");
+assert.equal(resolveConfirmation("yes but don't pause", pending, "running", 999), "unrelated");
+assert.equal(resolveConfirmation("yes", pending, "running", 1000), "expired");
+assert.equal(resolveConfirmation("yes", pending, "paused", 999), "expired");
+assert.equal(resolveConfirmation("yes", null, "running", 999), "unrelated");
+assert.equal(actionAllowed("pause", "paused"), false);
+assert.equal(confirmedPlan("resume", "running"), null);
+assert.equal(confirmedPlan("pause", "running").behaviour, "resting");
+assert.equal(confirmedPlan("start", "idle").goal, "Focus together");
+assert.match(proposalQuestion("pause"), /pause/);
+console.log("Functional intent and confirmation regression assertions passed.");
