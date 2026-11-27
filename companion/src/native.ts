@@ -25,12 +25,16 @@ export type ModelReply = { provider: Provider; model: string; screen_context_use
 export type AwarenessCue = "leisure_check" | "return_check";
 export type AwarenessStatus = { enabled: boolean; supported: boolean; category: "leisure" | "browser" | "other" | "unavailable"; cue: AwarenessCue | null };
 
-export type ScreenStatus = { supported: boolean; active: boolean; app: string | null; sample_ready: boolean; detail: string; cue: boolean; cloud_context: boolean };
+export type ScreenStatus = { supported: boolean; active: boolean; app: string | null; sample_ready: boolean; detail: string; cue: boolean; cloud_context: boolean; monitoring: boolean; relevance: "related" | "possible_distraction" | "unknown" };
 export type WindowChoice = { id: number; pid: number; bundle: string; app: string; title: string };
 export type ScreenPreview = { id: number; excerpt: string; goal: string; remaining_today: number; valid_for_ms: number };
 
+export type AnalyticsSnapshot = { goal: string; elapsed_ms: number; phase: Phase; active: boolean; monitoring: boolean; remaining_today: number; detail: string; metrics: { samples: number; related: number; possible_distraction: number; unknown: number; changes: number; analyses: number; check_ins: number; returns: number } };
+
 export const companion = {
-  startFollowScreen: (cloud: boolean) => invoke<ScreenStatus>("start_follow_screen", { cloud }),
+  startFollowScreen: (cloud: boolean, goal: string) => invoke<ScreenStatus>("start_follow_screen", { cloud, goal }),
+  openAnalytics: () => invoke<void>("open_analytics"),
+  analytics: () => invoke<AnalyticsSnapshot>("get_analytics"),
   panelKeyboard: (enabled: boolean) => invoke<void>("panel_keyboard", { enabled }),
   screenStatus: () => invoke<ScreenStatus>("screen_status"),
   requestScreenPermission: () => invoke<void>("request_screen_permission"),

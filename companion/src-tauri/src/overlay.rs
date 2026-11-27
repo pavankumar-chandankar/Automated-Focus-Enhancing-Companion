@@ -95,6 +95,7 @@ pub fn destroy_bin(app: &AppHandle) -> Result<(), String> {
 
 fn destroy_main(app: &AppHandle) -> Result<(), String> {
     crate::awareness::stop(app);
+    if let Some(analytics) = app.get_webview_window("analytics") { analytics.destroy().map_err(|e| e.to_string())?; }
     destroy_bin(app)?;
     if let Some(window) = app.get_webview_window("main") {
         window.hide().map_err(|e| e.to_string())?;

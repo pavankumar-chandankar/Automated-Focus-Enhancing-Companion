@@ -122,11 +122,16 @@ char *oplyra_screen_capture(uint32_t wid, int32_t pid, const char *bundle_utf8) 
             if (!content) return failure(@"Could not inspect selected window");
             SCWindow *selected = foreground_choice(content, wid, pid, bundle);
             if (!selected) return json_result(@{@"inactive":@YES});
+            NSString *title = selected.title ?: @"";
+            NSString *lower = title.lowercaseString;
+            for (NSString *sensitive in @[@"password", @"sign in", @"log in", @"login", @"incognito", @"private browsing", @"online banking", @"passwort", @"anmelden"]) {
+                if ([lower containsString:sensitive]) return json_result(@{@"inactive":@YES});
+            }
             pid_t capturedPID = selected.owningApplication.processID;
             SCContentFilter *filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:selected];
             SCStreamConfiguration *configuration = [SCStreamConfiguration new];
             CGSize size = selected.frame.size;
-            double scale = fmin(1.0, 1440.0 / fmax(size.width, size.height));
+            double scale = fmin(2.0, 2560.0 / fmax(size.width, size.height));
             configuration.width = (size_t)fmax(1.0, floor(size.width * scale));
             configuration.height = (size_t)fmax(1.0, floor(size.height * scale));
             configuration.showsCursor = NO;
@@ -144,21 +149,30 @@ char *oplyra_screen_capture(uint32_t wid, int32_t pid, const char *bundle_utf8) 
                 return failure(@"Selected window capture did not complete");
             if (NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != capturedPID) return json_result(@{@"inactive":@YES});
             VNRecognizeTextRequest *request = [VNRecognizeTextRequest new];
-            request.recognitionLevel = VNRequestTextRecognitionLevelFast;
-            request.usesLanguageCorrection = NO;
+            request.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
+            request.usesLanguageCorrection = YES;
             request.recognitionLanguages = @[@"en-US", @"de-DE"];
             VNImageRequestHandler *handler = [[VNImageRequestHandler alloc]
                 initWithCGImage:(__bridge CGImageRef)captured options:@{}];
             NSError *error = nil;
             if (![handler performRequests:@[request] error:&error]) return failure(@"Local text recognition failed");
+            // Prefer a reliable window title and top-to-bottom reading order.
             NSMutableString *text = [NSMutableString string];
-            for (VNRecognizedTextObservation *observation in request.results) {
+            if (title.length) [text appendFormat:@"Window: %@\n", bounded(title, 160)];
+            NSArray *ordered = [request.results sortedArrayUsingComparator:^NSComparisonResult(VNRecognizedTextObservation *a, VNRecognizedTextObservation *b) {
+                double ay = floor(CGRectGetMidY(a.boundingBox) / 0.015), by = floor(CGRectGetMidY(b.boundingBox) / 0.015);
+                if (ay != by) return ay > by ? NSOrderedAscending : NSOrderedDescending;
+                double ax = CGRectGetMinX(a.boundingBox), bx = CGRectGetMinX(b.boundingBox);
+                return ax < bx ? NSOrderedAscending : ax > bx ? NSOrderedDescending : NSOrderedSame;
+            }];
+            for (VNRecognizedTextObservation *observation in ordered) {
                 VNRecognizedText *candidate = [observation topCandidates:1].firstObject;
-                if (!candidate || candidate.confidence < 0.5) continue;
+                if (!candidate || candidate.confidence < 0.75) continue;
                 if (text.length) [text appendString:@"\n"];
                 [text appendString:bounded(candidate.string, 600)];
                 if (text.length >= 600) break;
             }
+            if (NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != capturedPID) return json_result(@{@"inactive":@YES});
             return json_result(@{@"text":bounded(text, 600)});
         }
         return failure(@"Window capture requires macOS 14 or newer");

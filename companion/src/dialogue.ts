@@ -17,6 +17,13 @@ export function awarenessCommand(input: string): "enable" | "disable" | "status"
   return null;
 }
 
+// Route natural monitoring requests to a consent panel, never auto-enable.
+export function monitoringRequest(input: string): boolean {
+  const t = input.trim().toLowerCase().replace(/[’‘]/g, "'");
+  if (/\b(?:don't|do not|never|stop|disable|should i|what if|hypothetically)\b|["“”]/.test(t)) return false;
+  return /\b(?:keep|get|bring|put)\s+me\s+(?:back\s+)?on\s+track\b|\b(?:remind|nudge|tell|alert)\s+me\b.{0,100}\b(?:distract\w*|divert\w*|switch tabs|off track)\b|\b(?:monitor|follow|watch)\s+my\s+(?:work|screen|tabs)\b/.test(t);
+}
+
 // Screen control is an explicit, local command boundary. The model cannot
 // select windows, activate capture, or authorize cloud transmission.
 export function screenCommand(input: string): "choose" | "preview" | "stop" | null {

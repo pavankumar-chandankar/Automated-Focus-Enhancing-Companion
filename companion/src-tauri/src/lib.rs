@@ -4,6 +4,7 @@ mod intelligence;
 mod overlay;
 mod awareness;
 mod screen;
+mod monitor;
 use policy::{Feedback, SupportMode};
 
 use std::{fs, path::PathBuf, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
@@ -64,7 +65,7 @@ fn get_snapshot(store: State<'_, SessionStore>) -> Result<SessionSnapshot, Strin
 #[tauri::command]
 fn start_session(app: tauri::AppHandle, store: State<'_, SessionStore>, goal: String, next_step: String) -> Result<SessionSnapshot, String> {
     let result = store.mutate(|session, now| session.start(&goal, &next_step, now));
-    if result.is_ok() { awareness::stop(&app); }
+    if result.is_ok() { awareness::stop(&app); screen::reset_analytics(&app); }
     result
 }
 
@@ -127,8 +128,13 @@ fn intelligence_provider() -> Result<intelligence::Provider, String> { intellige
 // Model output is a reply or a bounded proposal, never a native action.
 #[tauri::command]
 async fn local_companion_reply(app: tauri::AppHandle, store: State<'_, SessionStore>, screen: State<'_, screen::ScreenState>, message: String, history: Vec<intelligence::PreviousTurn>) -> Result<intelligence::ModelReply, String> {
-    let excerpt = screen::chat_context(&app).await;
-    let snapshot = store.snapshot()?;
+    // Ordinary emotional conversation must retain functional action proposals.
+    // OCR is attached only for screen-related requests, not every chat turn.
+    let lower = message.to_lowercase();
+    let screen_question = ["screen", "tab", "window", "what am i reading", "what am i working on", "what am i doing", "what do you see", "what can you see", "what can you read", "what is this", "what did you read", "what's this", "summarize", "summarise", "read this"].iter().any(|word| lower.contains(*word));
+    let excerpt = if screen_question { screen::chat_context(&app).await } else { None };
+    let mut snapshot = store.snapshot()?;
+    if let Some(goal) = screen::monitoring_goal(&screen) { snapshot.goal = goal; }
     let screen_active = screen::observation_active(&screen);
     let worker_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -185,6 +191,18 @@ fn finish_companion_drag(app: tauri::AppHandle) -> Result<bool, String> {
     dropped
 }
 
+#[tauri::command]
+async fn open_analytics(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("analytics") {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    let config = app.config().app.windows.iter().find(|w| w.label == "analytics").ok_or("Analytics config missing")?;
+    tauri::WebviewWindowBuilder::from_config(&app, config).map_err(|e| e.to_string())?.build().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
@@ -212,8 +230,9 @@ pub fn run() {
             let hide = MenuItem::with_id(app, "hide", "Hide Oplyra", true, None::<&str>)?;
             let stop_awareness = MenuItem::with_id(app, "stop-awareness", "Stop activity awareness", true, None::<&str>)?;
             let stop_screen = MenuItem::with_id(app, "stop-screen", "Stop screen observation", true, None::<&str>)?;
+            let analytics = MenuItem::with_id(app, "analytics", "Open analytics", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &hide, &stop_awareness, &stop_screen, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &hide, &analytics, &stop_awareness, &stop_screen, &quit])?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("app icon").clone())
                 .tooltip("Oplyra")
@@ -224,6 +243,7 @@ pub fn run() {
                     "hide" => overlay::request_hide(app),
                     "stop-awareness" => awareness::stop(app),
                     "stop-screen" => screen::stop(app),
+                    "analytics" => { let handle = app.clone(); tauri::async_runtime::spawn(async move { let _ = open_analytics(handle).await; }); },
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -247,7 +267,7 @@ pub fn run() {
             awareness::set_awareness, awareness::awareness_status, awareness::sample_awareness, awareness::suspend_awareness,
             screen::screen_status, screen::request_screen_permission, screen::start_follow_screen, screen::list_screen_windows,
             screen::select_screen_window, screen::sample_screen, screen::stop_screen,
-            screen::preview_screen, screen::analyze_screen
+            screen::preview_screen, screen::analyze_screen, screen::get_analytics, open_analytics
         ])
         .build(tauri::generate_context!())
         .expect("error while building Oplyra desktop")

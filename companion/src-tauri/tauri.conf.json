@@ -48,6 +48,24 @@
         "focusable": false,
         "create": false,
         "focus": false
+      },
+      {
+        "label": "analytics",
+        "title": "Oplyra — Analytics",
+        "url": "index.html#analytics",
+        "width": 960,
+        "height": 680,
+        "minWidth": 580,
+        "minHeight": 420,
+        "center": true,
+        "create": false,
+        "visible": true,
+        "decorations": true,
+        "transparent": false,
+        "resizable": true,
+        "maximizable": true,
+        "alwaysOnTop": false,
+        "focus": true
       }
     ],
     "security": {
