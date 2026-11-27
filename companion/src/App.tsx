@@ -6,7 +6,7 @@ import { getCurrentWindow, currentMonitor, LogicalSize, PhysicalPosition } from 
 import { invoke } from "@tauri-apps/api/core";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { companion, type SessionSnapshot, type PreviousTurn, type Provider, type AwarenessStatus, type AwarenessCue, type ScreenStatus, type ScreenPreview } from "./native";
-import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQuestion, resolveConfirmation, rememberTurn, awarenessCommand, screenCommand, monitoringRequest, monitoringGoalFromRequest, type Behaviour, type PendingAction } from "./dialogue";
+import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQuestion, resolveConfirmation, rememberTurn, awarenessCommand, screenCommand, monitoringRequest, monitoringGoalFromRequest, focusDeclaration, type Behaviour, type PendingAction } from "./dialogue";
 
 // Logical pixels. The visible native surface shrinks to the character when closed;
 // it is never a conventional full-window application.
@@ -81,6 +81,7 @@ function CompanionApp() {
   const screenEpoch = useRef(0);
   const screenActive = useRef(false);
   const [ambientCue, setAmbientCue] = useState("");
+  const [nativeCue, setNativeCue] = useState(false);
   const ambientTimer = useRef<number | null>(null);
   const [checkIn, setCheckIn] = useState<AwarenessCue | null>(null);
   const checkInExpiry = useRef(0);
@@ -140,11 +141,12 @@ function CompanionApp() {
     return () => { disposed = true; cleanup?.(); };
   }, []);
 
-  function showAmbient(text: string) {
+  function showAmbient(text: string, native = false) {
     if (expandedRef.current || held.current || hiding.current || actionRunning.current) return;
     if (ambientTimer.current !== null) window.clearTimeout(ambientTimer.current);
+    setNativeCue(native);
     setAmbientCue(text);
-    ambientTimer.current = window.setTimeout(() => { setAmbientCue(""); ambientTimer.current = null; }, 12000);
+    ambientTimer.current = window.setTimeout(() => { setAmbientCue(""); ambientTimer.current = null; }, native ? 8000 : 12000);
   }
 
   useEffect(() => {
@@ -163,7 +165,11 @@ function CompanionApp() {
         clearScreen();
         setError("Screen observation stopped: " + payload);
       });
-      if (disposed) second(); else cleanups.push(second);
+      if (disposed) { second(); return; } cleanups.push(second);
+      const third = await appWindow.listen<[string, boolean]>("oplyra-focus-cue", ({payload}) => {
+        if (!disposed && screenActive.current && !hiding.current) showAmbient(payload[0], payload[1]);
+      });
+      if (disposed) third(); else cleanups.push(third);
     };
     void subscribe().catch(() => {});
     return () => { disposed = true; cleanups.forEach(fn => fn()); if (ambientTimer.current !== null) window.clearTimeout(ambientTimer.current); };
@@ -180,7 +186,7 @@ function CompanionApp() {
     finally { actionRunning.current = false; setBusy(false); }
   }
 
-  function startFollowing(cloud: boolean) {
+  function startFollowing(cloud: boolean, switchWatch = false) {
     void screenOperation(async () => {
       const epoch = screenEpoch.current;
       if (current?.phase === "idle") {
@@ -188,14 +194,14 @@ function CompanionApp() {
         setCurrent(data);
       }
       if (epoch !== screenEpoch.current || hiding.current || !expandedRef.current) return;
-      const status = await companion.startFollowScreen(cloud, monitorGoal.trim());
+      const status = await companion.startFollowScreen(cloud, monitorGoal.trim(), switchWatch);
       if (epoch !== screenEpoch.current || hiding.current || !expandedRef.current) {
         await companion.stopScreen(); return;
       }
       clearScreenPanel();
       screenActive.current = status.active;
       setScreen(status);
-      setReply(cloud ? "I’ll keep track of your goal and gently check in if a sustained change looks unrelated. Carry on; you don’t need to chat with me." : "I’ll observe supported apps locally. Semantic distraction assessment is off.");
+      setReply(switchWatch ? "Close this bubble on your intended tab. I’ll remind you when you stay on a different tab, even without internet." : cloud ? "I’ll keep track of your goal and gently check in if a sustained change looks unrelated. Carry on; you don’t need to chat with me." : "I’ll observe supported apps locally. Semantic distraction assessment is off.");
       setSource("command");
     });
   }
@@ -328,6 +334,7 @@ function CompanionApp() {
 
   async function toggleDetails(open: boolean) {
     if (resizing) return;
+    if (open) void companion.dismissFocusCue().catch(() => {});
     setResizing(true);
     if (!open) {
       visibilityEpoch.current += 1;
@@ -523,7 +530,8 @@ function CompanionApp() {
   async function sendMessage() {
     if (actionRunning.current || hiding.current || !current || !message.trim()) return;
     const userMessage = message.trim();
-    const requestedMonitoring = screenCommand(userMessage) !== "choose" && monitoringRequest(userMessage);
+    const declaredGoal = !screen?.active ? focusDeclaration(userMessage) : null;
+    const requestedMonitoring = !!declaredGoal || (screenCommand(userMessage) !== "choose" && monitoringRequest(userMessage));
     const screenRequest = requestedMonitoring ? "choose" : screenCommand(userMessage) ?? (screen?.active && /^what can you see[.!?]*$/i.test(userMessage) ? "preview" : null);
     if (screenRequest && !(screenRequest === "preview" && screen?.cloud_context)) {
       pendingAction.current = null;
@@ -541,8 +549,8 @@ function CompanionApp() {
           screenActive.current = false;
           setAmbientCue("");
           setScreen(old => old ? {...old, active:false, app:null, sample_ready:false, cloud_context:false, monitoring:false, relevance:"unknown"} : null);
-          setMonitorGoal(monitoringGoalFromRequest(userMessage, current.phase === "idle" ? "" : current.goal));
-          setReply("I can follow your work and gently check in if you drift. Confirm your goal below.");
+          setMonitorGoal(declaredGoal ?? monitoringGoalFromRequest(userMessage, current.phase === "idle" ? "" : current.goal));
+          setReply("I can remind you when you leave your focus tab. Confirm your goal below.");
           setScreenPanel("permission");
         });
         return;
@@ -740,7 +748,7 @@ function CompanionApp() {
   }, [expanded, resizing]);
 
   const phase = current?.phase ?? "idle";
-  const phaseName = screen?.active && phase === "running" ? (screen.monitoring ? "Monitoring on" : screen.sample_ready ? "Screen · read" : "Screen · local") : awareness?.enabled && phase === "running" ? (checkIn ? "Check-in · aware" : "Working · aware") : phase === "running" ? "Working together" : phase === "paused" ? "On a break" : "Here with you";
+  const phaseName = screen?.active && phase === "running" ? (screen.tab_reminders ? (screen.reference_set ? "Tab reminders on" : "Finding focus tab…") : screen.monitoring ? "Monitoring on" : screen.sample_ready ? "Screen · read" : "Screen · local") : awareness?.enabled && phase === "running" ? (checkIn ? "Check-in · aware" : "Working · aware") : phase === "running" ? "Working together" : phase === "paused" ? "On a break" : "Here with you";
 
   return (
     <main className={`overlay ${expanded ? "is-expanded" : "is-compact"} ${dragging ? "is-dragging" : ""}`}>
@@ -771,7 +779,7 @@ function CompanionApp() {
           <span className={`status-light status-${phase}`} />
           <span>{phaseName}</span>
         </div>
-        {!expanded && !dragging && ambientCue && <div className="ambient-cue" role="status">{ambientCue}</div>}
+        {!expanded && !dragging && ambientCue && !nativeCue && <div className="ambient-cue" role="status">{ambientCue}</div>}
       </div>
 
       {expanded && (
@@ -784,11 +792,12 @@ function CompanionApp() {
           {screenPanel === "permission" && <div className="screen-controls">
             <label htmlFor="monitor-goal">Current focus goal</label>
             <textarea id="monitor-goal" rows={2} maxLength={160} value={monitorGoal} onPointerDown={() => { void companion.panelKeyboard(true).catch(() => {}); }} onChange={e => setMonitorGoal(e.target.value)} placeholder="e.g. Read my reliability engineering textbook" />
-            <p className="screen-detail">Start on the intended document. If you say “this document”, the first titled work window becomes the reference. Stop before opening private material.</p>
+            <p className="screen-detail">Close chat on your intended tab to set the reference. Local reminders detect title changes without reading screenshots or using AI.</p>
+            <button type="button" disabled={busy || !monitorGoal.trim()} onClick={() => startFollowing(false, true)}>Remind me on tab switches</button>
             <button type="button" disabled={busy || provider !== "groq" || !monitorGoal.trim()} onClick={() => startFollowing(true)}>Monitor &amp; remind me (Groq)</button>
             <button type="button" disabled={busy} onClick={() => startFollowing(false)}>Local observation only</button>
             <button type="button" className="secondary-screen" disabled={busy} onClick={clearScreenPanel}>Cancel</button>
-            <p className="screen-detail">Monitoring sends short window-title and OCR excerpts (up to 600 characters) plus your goal to Groq automatically after sustained changes, and during screen-related chat. Shared limit 20/day; at least 8 reserved from background checks. No screenshots sent.</p>
+            <p className="screen-detail">Only the separate Groq option sends short window-title/OCR excerpts and your goal automatically. Shared limit 20/day; no screenshots sent. Local tab reminders use no Groq quota.</p>
           </div>}
           {screenPanel === "preview" && screenPreview && <div className="screen-controls">
             <p className="screen-detail">Goal: {screenPreview.goal || "(not set)"}</p>

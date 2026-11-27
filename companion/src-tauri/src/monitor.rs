@@ -95,9 +95,78 @@ impl Monitor {
     }
 }
 
+// Explicit reference-tab guard. A title change is not proof of distraction.
+#[derive(Default)]
+pub struct SwitchGuard {
+    anchor: Option<u64>,
+    last: Option<u64>,
+    since: Option<Instant>,
+    last_seen: Option<Instant>,
+    last_cue: Option<Instant>,
+    reminded: bool,
+}
+#[derive(Default)]
+pub struct SwitchUpdate { pub changed: bool, pub returned: bool, pub cue: bool }
+impl SwitchGuard {
+    pub fn gap(&mut self) { self.last = None; self.since = None; self.last_seen = None; }
+    pub fn sample(&mut self, now: Instant, key: u64) -> SwitchUpdate {
+        let mut u = SwitchUpdate::default();
+        if self.last_seen.is_some_and(|t| now.saturating_duration_since(t) > Duration::from_secs(12)) { self.gap(); }
+        self.last_seen = Some(now);
+        if self.anchor.is_none() {
+            self.anchor = Some(key); self.last = Some(key); self.since = Some(now);
+            return u;
+        }
+        if self.last != Some(key) {
+            u.changed = self.last.is_some();
+            self.last = Some(key); self.since = Some(now);
+        }
+        if self.anchor == Some(key) {
+            u.returned = self.reminded;
+            self.reminded = false;
+            return u;
+        }
+        if !self.reminded && self.since.is_some_and(|t| now.saturating_duration_since(t) >= Duration::from_secs(4)) &&
+            self.last_cue.is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(30)) {
+            self.reminded = true; self.last_cue = Some(now); u.cue = true;
+        }
+        u
+    }
+    pub fn on_reference(&self) -> bool { self.anchor.is_some() && self.anchor == self.last }
+    pub fn anchored(&self) -> bool { self.anchor.is_some() }
+    pub fn away(&self) -> bool { self.anchor.is_some() && self.last.is_some() && self.anchor != self.last }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn switch_guard_reminds_without_classifier_and_rearms_on_return() {
+        let t = Instant::now(); let at = |s| t + Duration::from_secs(s);
+        let mut g = SwitchGuard::default();
+        assert!(!g.sample(at(0), 1).cue);
+        assert!(g.on_reference());
+        assert!(!g.sample(at(2), 2).cue);
+        assert!(!g.sample(at(4), 2).cue);
+        assert!(g.sample(at(6), 2).cue);
+        assert!(!g.sample(at(8), 3).cue);
+        assert!(g.sample(at(12), 1).returned);
+        assert!(!g.sample(at(14), 2).cue);
+        assert!(!g.sample(at(18), 2).cue);
+        assert!(!g.sample(at(28), 2).cue);
+        assert!(g.sample(at(36), 2).cue);
+    }
+    #[test]
+    fn switch_guard_ignores_brief_switches_and_gaps() {
+        let t = Instant::now(); let at = |s| t + Duration::from_secs(s);
+        let mut g = SwitchGuard::default();
+        g.sample(at(0), 1); g.sample(at(2), 2);
+        assert!(!g.sample(at(3), 1).cue);
+        g.sample(at(5), 2); g.gap();
+        assert!(!g.sample(at(20), 2).cue);
+        assert!(!g.sample(at(21), 2).cue);
+        assert!(g.sample(at(24), 2).cue);
+        assert!(!g.sample(at(26), 2).cue);
+    }
     #[test]
     fn sustained_diversion_then_return() {
         let start = Instant::now(); let at = |s| start + Duration::from_secs(s);

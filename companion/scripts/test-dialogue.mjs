@@ -7,7 +7,7 @@ const input = await readFile(new URL("../src/dialogue.ts", import.meta.url), "ut
 const { outputText } = ts.transpileModule(input, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
 });
-const { planMessage, restingBehaviour, actionAllowed, confirmedPlan, resolveConfirmation, proposalQuestion, rememberTurn, awarenessCommand, screenCommand, monitoringRequest, monitoringGoalFromRequest } = await import("data:text/javascript;base64," + Buffer.from(outputText).toString("base64"));
+const { planMessage, restingBehaviour, actionAllowed, confirmedPlan, resolveConfirmation, proposalQuestion, rememberTurn, awarenessCommand, screenCommand, monitoringRequest, monitoringGoalFromRequest, focusDeclaration } = await import("data:text/javascript;base64," + Buffer.from(outputText).toString("base64"));
 const cases = [
   ["Let's study together.", "idle", "start", "working"],
   ["I need to work on my paper", "idle", "start", "working"],
@@ -164,3 +164,10 @@ stop();stale();
 assert.equal(scheduled.size,0);
 assert.equal(emitted.at(-1),"turn-page");
 console.log("Autonomous scheduler cancellation and recurrence assertions passed.");
+
+assert.equal(focusDeclaration("I am focusing on reliability engineering."),"I am focusing on reliability engineering.");
+assert.equal(focusDeclaration("I'm reading this document"),"I'm reading this document");
+assert.equal(focusDeclaration("I'm not focusing on anything"),null);
+assert.equal(focusDeclaration("I am focusing on this?"),null);
+assert.equal(focusDeclaration("I am exhausted"),null);
+console.log("Concrete focus declaration routing assertions passed.");

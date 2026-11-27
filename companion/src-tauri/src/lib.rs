@@ -149,6 +149,7 @@ async fn local_companion_reply(app: tauri::AppHandle, store: State<'_, SessionSt
 // the user intentionally holds and drags the companion. No fullscreen layer.
 #[tauri::command]
 async fn begin_companion_drag(app: tauri::AppHandle) -> Result<(), String> {
+    screen::dismiss_cue(&app);
     let main = app.get_webview_window("main").ok_or("Companion window unavailable")?;
     let monitor = main.current_monitor().map_err(|e| e.to_string())?
         .ok_or("No display available for drop target")?;
@@ -267,7 +268,7 @@ pub fn run() {
             awareness::set_awareness, awareness::awareness_status, awareness::sample_awareness, awareness::suspend_awareness,
             screen::screen_status, screen::request_screen_permission, screen::start_follow_screen, screen::list_screen_windows,
             screen::select_screen_window, screen::sample_screen, screen::stop_screen,
-            screen::preview_screen, screen::analyze_screen, screen::get_analytics, open_analytics
+            screen::preview_screen, screen::analyze_screen, screen::get_analytics, screen::dismiss_focus_cue, open_analytics
         ])
         .build(tauri::generate_context!())
         .expect("error while building Oplyra desktop")

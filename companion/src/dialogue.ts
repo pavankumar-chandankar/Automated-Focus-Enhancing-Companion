@@ -24,6 +24,16 @@ export function monitoringRequest(input: string): boolean {
   return /\b(?:keep|get|bring|put)\s+me\s+(?:back\s+)?on\s+track\b|\b(?:remind|nudge|tell|alert)\s+me\b.{0,100}\b(?:distract\w*|divert\w*|switch tabs|off track)\b|\b(?:monitor|follow|watch)\s+my\s+(?:work|screen|tabs)\b/.test(t);
 }
 
+// A concrete declared focus is an opportunity to offer local reminders,
+// never authorization to monitor without an explicit confirmation.
+export function focusDeclaration(input: string): string | null {
+  const clean = input.trim().replace(/[’‘]/g, "'");
+  if (/["“”]|\b(?:don't|do not|not|never|what if|hypothetically)\b/i.test(clean)) return null;
+  const match = clean.match(/^(?:i am|i'm|i will be|i'll be|i want to|i need to)\s+(?:focusing on|focus on|studying|study|reading|read|working on|work on)\s+(.+?)[.!?]*$/i);
+  if (!match || match[1].trim().length < 3 || /\?$/.test(clean)) return null;
+  return Array.from(clean).slice(0,160).join("");
+}
+
 // A consent request is not a task. Extract an explicit task if one was
 // actually stated, otherwise keep a meaningful existing goal or ask.
 export function monitoringGoalFromRequest(input: string, previous: string): string {
