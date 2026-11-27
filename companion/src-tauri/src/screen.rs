@@ -9,6 +9,7 @@ const SAMPLE_INTERVAL: Duration = Duration::from_secs(15);
 const FRESHNESS: Duration = Duration::from_secs(60);
 const DAILY_ANALYSES: u32 = 20;
 const ANALYSIS_INTERVAL: u64 = 60;
+const CHAT_INTERVAL: u64 = 5;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct WindowChoice {
@@ -27,6 +28,7 @@ pub struct ScreenStatus {
     sample_ready: bool,
     detail: String,
     cue: bool,
+    cloud_context: bool,
 }
 
 #[derive(Clone)]
@@ -60,11 +62,13 @@ struct Observation {
     missing_since: Option<Instant>,
     last_cue: Option<Instant>,
     cues: u8,
+    cloud_context: bool,
 }
 impl Observation {
     fn reset(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.selection = None;
+        self.cloud_context = false;
         self.choices.clear();
         self.listed_at = None;
         self.last_attempt = None;
@@ -82,7 +86,7 @@ impl Observation {
             active: self.selection.is_some(),
             app: self.selection.as_ref().map(|w| w.app.clone()),
             sample_ready: self.fresh(Instant::now()).is_some(),
-            detail: self.detail.clone(), cue: false,
+            detail: self.detail.clone(), cue: false, cloud_context: self.cloud_context,
         }
     }
 }
@@ -106,10 +110,11 @@ impl Budget {
         if now / 86_400 < self.day || now < self.last { return 0; }
         if now / 86_400 > self.day { DAILY_ANALYSES } else { DAILY_ANALYSES.saturating_sub(self.used) }
     }
-    fn reserve(&mut self, now: u64) -> Result<(), String> {
+    fn reserve(&mut self, now: u64) -> Result<(), String> { self.reserve_with_interval(now, ANALYSIS_INTERVAL) }
+    fn reserve_with_interval(&mut self, now: u64, interval: u64) -> Result<(), String> {
         if self.remaining(now) == 0 { return Err("Daily screen-analysis budget exhausted".into()); }
-        if self.last != 0 && now.saturating_sub(self.last) < ANALYSIS_INTERVAL {
-            return Err("Wait at least one minute between screen analyses".into());
+        if self.last != 0 && now.saturating_sub(self.last) < interval {
+            return Err("Screen-analysis cooldown is active".into());
         }
         let day = now / 86_400;
         if day > self.day { self.day = day; self.used = 0; }
@@ -180,6 +185,72 @@ pub fn request_screen_permission(app: AppHandle) -> Result<(), String> {
         return Err("Allow screen recording in System Settings, then relaunch Oplyra if required".into());
     }
     Ok(())
+}
+
+// Explicit session opt-in, no window chooser. This does not bypass the OS
+// permission, app allowlist or running-session/visibility gates.
+#[tauri::command]
+pub fn start_follow_screen(app: AppHandle, state: State<'_, ScreenState>, cloud: bool) -> Result<ScreenStatus, String> {
+    if cloud && crate::intelligence::configured_provider()? != crate::intelligence::Provider::Groq {
+        return Err("AI screen context requires the Groq provider".into());
+    }
+    let generation = state.observation.lock().map_err(|_| "Screen state unavailable")?.generation;
+    request_screen_permission(app.clone())?;
+    if !visible_running(&app) { return Err("Screen consent was cancelled".into()); }
+    let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
+    if o.generation != generation { return Err("Screen consent was cancelled".into()); }
+    o.reset();
+    o.selection = Some(WindowChoice { id: 0, pid: 0, bundle: String::new(), app: "Foreground work apps".into(), title: String::new() });
+    o.cloud_context = cloud;
+    o.detail = "Following supported foreground apps".into();
+    Ok(o.status())
+}
+
+// Read a fresh excerpt on a user-initiated chat turn. Never use a cached
+// excerpt from the previous tab, never start capture without consent.
+pub struct ChatContext { pub text: String, generation: u64 }
+
+pub async fn chat_context(app: &AppHandle) -> Option<ChatContext> {
+    if crate::intelligence::configured_provider().ok()? != crate::intelligence::Provider::Groq || !visible_running(app) { return None; }
+    let (choice, generation) = {
+        let state = app.state::<ScreenState>();
+        let mut o = state.observation.lock().ok()?;
+        if !o.cloud_context || o.busy { return None; }
+        let choice = o.selection.clone()?;
+        let budget = Budget::read(&state.budget_path).ok()?;
+        let now = wall_seconds().ok()?;
+        if budget.remaining(now) == 0 || (budget.last != 0 && now.saturating_sub(budget.last) < CHAT_INTERVAL) { return None; }
+        o.busy = true;
+        (choice, o.generation)
+    };
+    let result = tauri::async_runtime::spawn_blocking(move || platform::capture(&choice)).await;
+    let visible = visible_running(app);
+    let state = app.state::<ScreenState>();
+    let mut o = state.observation.lock().ok()?;
+    o.busy = false;
+    if o.generation != generation || !o.cloud_context || !visible { return None; }
+    let text = match result {
+        Ok(Ok(Some(text))) => normalize(&text),
+        Ok(Ok(None)) => { o.latest = None; o.reviewed = None; o.detail = "No eligible foreground work window".into(); return None; }
+        _ => { o.reset(); drop(o); let _ = app.emit("oplyra-screen-stopped", ()); return None; }
+    };
+    if text.is_empty() {
+        o.latest = None; o.reviewed = None;
+        o.detail = "Captured window; no readable text".into();
+        return None;
+    }
+    o.serial = o.serial.checked_add(1)?;
+    o.latest = Some(Sample { id: o.serial, at: Instant::now(), text: text.clone() });
+    o.reviewed = None;
+    o.detail = "Text recognised locally".into();
+    let mut budget = Budget::read(&state.budget_path).ok()?;
+    budget.reserve_with_interval(wall_seconds().ok()?, CHAT_INTERVAL).ok()?;
+    budget.save(&state.budget_path).ok()?;
+    Some(ChatContext { text, generation })
+}
+
+pub fn cloud_context_active(state: &ScreenState, context: &ChatContext) -> bool {
+    state.observation.lock().map(|o| o.cloud_context && o.selection.is_some() && o.generation == context.generation).unwrap_or(false)
 }
 
 #[tauri::command]
@@ -408,6 +479,17 @@ mod tests {
         assert_eq!(b.remaining(start - 1), 0);
         b.reserve(start + 86_400).unwrap();
         assert_eq!(b.used, 1);
+    }
+    #[test]
+    fn chat_and_review_share_daily_budget() {
+        let mut b = Budget::default();
+        let start = 10 * 86_400;
+        b.reserve_with_interval(start, CHAT_INTERVAL).unwrap();
+        assert!(b.reserve_with_interval(start + 4, CHAT_INTERVAL).is_err());
+        b.reserve_with_interval(start + 5, CHAT_INTERVAL).unwrap();
+        assert!(b.reserve(start + 6).is_err());
+        b.reserve(start + 65).unwrap();
+        assert_eq!(b.remaining(start + 65), DAILY_ANALYSES - 3);
     }
     #[test]
     fn revocation_removes_sample_and_review_but_not_inflight_guard() {

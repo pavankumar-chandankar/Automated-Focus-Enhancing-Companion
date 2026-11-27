@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { getCurrentWindow, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
+import { getCurrentWindow, currentMonitor, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { companion, type Phase, type SessionSnapshot, type PreviousTurn, type Provider, type AwarenessStatus, type AwarenessCue, type ScreenStatus, type WindowChoice, type ScreenPreview } from "./native";
+import { companion, type Phase, type SessionSnapshot, type PreviousTurn, type Provider, type AwarenessStatus, type AwarenessCue, type ScreenStatus, type ScreenPreview } from "./native";
 import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQuestion, resolveConfirmation, rememberTurn, awarenessCommand, screenCommand, type Behaviour, type PendingAction } from "./dialogue";
 
 // Logical pixels. The visible native surface shrinks to the character when closed;
 // it is never a conventional full-window application.
 const COMPACT = new LogicalSize(192, 210);
-const OPEN = new LogicalSize(342, 400);
+const OPEN = new LogicalSize(436, 550);
 const appWindow = getCurrentWindow();
 // A click remains a click; moving the pointer at least 4px while pressed
 // begins dragging immediately, with no long-press timer.
@@ -113,9 +113,8 @@ function CompanionApp() {
   const [activeModel, setActiveModel] = useState<string | null>(null);
   const [awareness, setAwareness] = useState<AwarenessStatus | null>(null);
   const [screen, setScreen] = useState<ScreenStatus | null>(null);
-  const [screenPanel, setScreenPanel] = useState<"permission" | "choose" | "preview" | null>(null);
-  const [windows, setWindows] = useState<WindowChoice[]>([]);
-  const [selectedWindow, setSelectedWindow] = useState("");
+  const [screenPanel, setScreenPanel] = useState<"permission" | "preview" | null>(null);
+  const [usedScreenContext, setUsedScreenContext] = useState(false);
   const [screenPreview, setScreenPreview] = useState<ScreenPreview | null>(null);
   const screenEpoch = useRef(0);
   const screenActive = useRef(false);
@@ -157,16 +156,15 @@ function CompanionApp() {
   function clearScreenPanel() {
     screenEpoch.current += 1;
     setScreenPanel(null);
-    setWindows([]);
-    setSelectedWindow("");
     setScreenPreview(null);
   }
 
   function clearScreen() {
+    setUsedScreenContext(false);
     screenActive.current = false;
     setAmbientCue("");
     clearScreenPanel();
-    setScreen(old => old ? {...old, active: false, app: null, sample_ready: false} : null);
+    setScreen(old => old ? {...old, active: false, app: null, sample_ready: false, cloud_context: false} : null);
   }
 
   useEffect(() => {
@@ -217,35 +215,17 @@ function CompanionApp() {
     finally { actionRunning.current = false; setBusy(false); }
   }
 
-  function chooseWindows() {
+  function startFollowing(cloud: boolean) {
     void screenOperation(async () => {
       const epoch = screenEpoch.current;
-      await companion.requestScreenPermission();
-      if (epoch !== screenEpoch.current || hiding.current || !expandedRef.current) return;
-      const choices = await companion.listScreenWindows();
-      if (epoch !== screenEpoch.current || hiding.current || !expandedRef.current) {
-        await companion.stopScreen(); return;
-      }
-      setScreen(old => old ? {...old, active: false, app:null, sample_ready:false} : null);
-      setWindows(choices);
-      setSelectedWindow("");
-      setScreenPanel("choose");
-      setReply(choices.length ? "Choose a single window or follow supported work apps. Local OCR only." : "No supported visible work windows found. Open a browser or document and try again.");
-    });
-  }
-
-  function startWindow() {
-    void screenOperation(async () => {
-      if (!selectedWindow) return;
-      const epoch = screenEpoch.current;
-      const status = await companion.selectScreenWindow(Number(selectedWindow));
+      const status = await companion.startFollowScreen(cloud);
       if (epoch !== screenEpoch.current || hiding.current || !expandedRef.current) {
         await companion.stopScreen(); return;
       }
       clearScreenPanel();
       screenActive.current = status.active;
       setScreen(status);
-      setReply("Local observation is on. Close this bubble and carry on working. Ask what I can read whenever you want.");
+      setReply(cloud ? "I'll follow your work apps and use fresh screen text when we chat, within our screen budget. You can stop me anytime." : "I'll follow your work apps locally. Nothing from your screen is sent automatically.");
       setSource("command");
     });
   }
@@ -395,7 +375,19 @@ function CompanionApp() {
     }
     try {
       // The hit-test region grows only when the user explicitly opens controls.
-      await appWindow.setSize(open ? OPEN : COMPACT);
+      if (open) {
+        const monitor = await currentMonitor();
+        if (monitor) {
+          const area = monitor.workArea;
+          const scale = monitor.scaleFactor;
+          const size = new LogicalSize(Math.min(OPEN.width, Math.floor(area.size.width / scale)), Math.min(OPEN.height, Math.floor(area.size.height / scale)));
+          const pos = await appWindow.outerPosition();
+          const x = Math.max(area.position.x, Math.min(pos.x, area.position.x + area.size.width - Math.ceil(size.width * scale)));
+          const y = Math.max(area.position.y, Math.min(pos.y, area.position.y + area.size.height - Math.ceil(size.height * scale)));
+          await appWindow.setSize(size);
+          await appWindow.setPosition(new PhysicalPosition(Math.round(x), Math.round(y)));
+        } else await appWindow.setSize(OPEN);
+      } else await appWindow.setSize(COMPACT);
       expandedRef.current = open;
       visibilityEpoch.current += 1;
       setExpanded(open);
@@ -554,7 +546,7 @@ function CompanionApp() {
     if (actionRunning.current || hiding.current || !current || !message.trim()) return;
     const userMessage = message.trim();
     const screenRequest = screenCommand(userMessage) ?? (screen?.active && /^what can you see[.!?]*$/i.test(userMessage) ? "preview" : null);
-    if (screenRequest) {
+    if (screenRequest && !(screenRequest === "preview" && screen?.cloud_context)) {
       pendingAction.current = null;
       awarenessPending.current = null;
       clearScreenPanel();
@@ -570,7 +562,7 @@ function CompanionApp() {
           screenActive.current = false;
           setAmbientCue("");
           setScreen(old => old ? {...old, active:false, app:null, sample_ready:false} : null);
-          setReply("I can read a chosen window, or follow supported work apps locally. Avoid sensitive pages. Nothing is sent to Groq unless you review and approve it.");
+          setReply("I can follow whichever supported work app is in front. Choose local reading, or let me share short OCR excerpts with Groq when you send a message. Stop before opening private pages.");
           setScreenPanel("permission");
         });
         return;
@@ -668,9 +660,10 @@ function CompanionApp() {
     setMessage("");
     setSource(null);
     setLatency(null);
+    setUsedScreenContext(false);
     try {
       let data = current;
-      if (plan.action === "none" && plan.useModel) {
+      if (plan.action === "none" && (plan.useModel || (screenRequest === "preview" && screen?.cloud_context))) {
         setReply("Thinking…");
         setReaction("attentive");
         try {
@@ -679,6 +672,7 @@ function CompanionApp() {
             setAiNotice("");
             setSource(generated.provider);
             setActiveModel(generated.model);
+            setUsedScreenContext(generated.screen_context_used);
             setLatency(generated.latency_ms);
             if (generated.proposal) {
               // No model-generated instruction is executed. A proposal is a
@@ -699,14 +693,15 @@ function CompanionApp() {
             } else {
               setReply(generated.reply);
               setReaction(plan.behaviour === "encouraging" ? "encouraging" : generated.reaction);
-              history.current = rememberTurn(history.current, userMessage, generated.reply);
+              // Do not retain potentially screen-derived content in chat history.
+              if (!generated.screen_context_used) history.current = rememberTurn(history.current, userMessage, generated.reply);
             }
           }
         } catch (failure) {
           // Native provider errors contain no message content; keep diagnostics local.
           console.warn("AI request failed:", String(failure));
           if (expandedRef.current && visibility === visibilityEpoch.current) {
-            setReply(plan.reply);
+            setReply(screenRequest === "preview" ? "I couldn’t use fresh screen context right now. Try again shortly or use local reading." : plan.reply);
             setReaction(plan.behaviour);
             setSource("fallback");
             setAiNotice(String(failure).includes("Groq rate limit") ? "Groq limit reached · try later" : String(failure).includes("Groq API key missing") ? "Groq API key missing" : "AI unavailable · basic response");
@@ -764,7 +759,7 @@ function CompanionApp() {
 
   const phase = current?.phase ?? "idle";
   const behaviour = checkIn && !expanded ? "attentive" : reaction ?? (expanded ? "attentive" : restingBehaviour(phase));
-  const phaseName = screen?.active && phase === "running" ? (screen.sample_ready ? "Screen · read" : "Screen · local") : awareness?.enabled && phase === "running" ? (checkIn ? "Check-in · aware" : "Working · aware") : phase === "running" ? "Working together" : phase === "paused" ? "On a break" : "Here with you";
+  const phaseName = screen?.active && phase === "running" ? (screen.cloud_context ? "Screen · AI" : screen.sample_ready ? "Screen · read" : "Screen · local") : awareness?.enabled && phase === "running" ? (checkIn ? "Check-in · aware" : "Working · aware") : phase === "running" ? "Working together" : phase === "paused" ? "On a break" : "Here with you";
 
   return (
     <main className={`overlay ${expanded ? "is-expanded" : "is-compact"} ${dragging ? "is-dragging" : ""}`}>
@@ -798,21 +793,17 @@ function CompanionApp() {
 
       {expanded && (
         <section id="companion-controls" className="conversation-bubble" aria-label="Talk to Oplyra">
+          <div className="conversation-heading"><strong>Oplyra</strong><button type="button" onClick={() => void toggleDetails(false)} aria-label="Fold conversation">−</button></div>
+          <div className="conversation-content">
           <p className="companion-reply" role="status" aria-live="polite">
             {reply || (phase === "running" ? "How's it going?" : phase === "paused" ? "Ready when you are." : "Let's spend some time together.")}
           </p>
           {screenPanel === "permission" && <div className="screen-controls">
-            <button type="button" disabled={busy} onClick={chooseWindows}>Choose work window</button>
+            <p className="screen-detail">Follow supported apps automatically, including visible browser tabs. Stop before viewing private material.</p>
+            <button type="button" disabled={busy || provider !== "groq"} onClick={() => startFollowing(true)}>Follow + AI context</button>
+            <button type="button" disabled={busy} onClick={() => startFollowing(false)}>Follow locally only</button>
             <button type="button" className="secondary-screen" disabled={busy} onClick={clearScreenPanel}>Cancel</button>
-          </div>}
-          {screenPanel === "choose" && <div className="screen-controls">
-            <select aria-label="Select a work window" value={selectedWindow} onChange={event => setSelectedWindow(event.target.value)} disabled={busy}>
-              <option value="">Select a window…</option>
-              {windows.map(w => <option key={w.id} value={w.id}>{w.app}{w.title ? " — " + w.title : ""}</option>)}
-            </select>
-            <p className="screen-detail">Follow mode reads whichever supported work window is in front, including browser tabs. Avoid sensitive pages.</p>
-            <button type="button" disabled={busy || !selectedWindow} onClick={startWindow}>{selectedWindow === "0" ? "Follow work apps locally" : "Watch this window"}</button>
-            <button type="button" className="secondary-screen" disabled={busy} onClick={clearScreenPanel}>Cancel</button>
+            <p className="screen-detail">AI context: up to 600 characters sent to Groq on chat turns only, at most 20 per UTC day (5 seconds apart). No background cloud calls.</p>
           </div>}
           {screenPanel === "preview" && screenPreview && <div className="screen-controls">
             <p className="screen-detail">Goal: {screenPreview.goal || "(not set)"}</p>
@@ -821,6 +812,8 @@ function CompanionApp() {
             <button type="button" disabled={busy || provider !== "groq" || screenPreview.remaining_today === 0} onClick={sharePreview}>Analyze with Groq once</button>
             <button type="button" className="secondary-screen" disabled={busy} onClick={clearScreenPanel}>Don't share</button>
           </div>}
+          {error && <p className="error-message" role="alert">{error}</p>}
+          </div>
           <form className="conversation-form" onSubmit={(event) => { event.preventDefault(); void sendMessage(); }}>
             <input aria-label="Type to Oplyra" value={message} maxLength={300}
               placeholder={pendingAction.current || awarenessPending.current !== null ? "Yes or no…" : "Say something…"} disabled={!ready || !current || busy}
@@ -831,9 +824,9 @@ function CompanionApp() {
             </button>
           </form>
           <p className="conversation-note">{awarenessPending.current !== null ? "Reply yes or no · awareness is off" : pendingAction.current ? "Reply yes or no · no change yet" : source === "local" || source === "deepseek" || source === "groq" ? `${source === "groq" ? "GPT-OSS-120B · Groq" : source === "deepseek" ? "DeepSeek · online" : activeModel ?? "Local AI"} · ${((latency ?? 0) / 1000).toFixed(1)} s` : source === "fallback" ? aiNotice || "AI unavailable · basic response" : provider === "groq" ? "Groq online · chat and session context sent" : provider === "deepseek" ? "DeepSeek online · chat and session context sent" : provider === "local" ? "On-device · Talk to Oplyra." : "AI provider loading…"} </p>
-          {screen?.active && <p className="screen-detail">Local OCR · {screen.app} · {screen.detail || (screen.sample_ready ? "text available" : "waiting for window")} · say “stop watching my screen”</p>}
-          {error && <p className="error-message" role="alert">{error}</p>}
-        </section>
+          {screen?.active && <div className="screen-footer"><span>{screen.cloud_context ? "AI context permitted" : "Local OCR only"} · {screen.detail || "Waiting for work app"}</span><button type="button" onClick={() => { void companion.stopScreen().then(() => { clearScreen(); setUsedScreenContext(false); setReply("Screen observation is off."); }).catch(failure => setError(String(failure))); }}>Stop</button></div>}
+          {screen?.cloud_context && <p className="screen-detail">{usedScreenContext ? "Last reply used fresh screen text." : "No screen text used in last reply (or budget/capture unavailable)."}</p>}
+          </section>
       )}
       {!expanded && error && <div className="compact-error" role="alert" title={error}>!</div>}
     </main>

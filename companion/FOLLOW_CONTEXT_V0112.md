@@ -1,0 +1,9 @@
+# v0.11.2 — automatic foreground following
+
+Start a focus session and say Watch my screen. Choose Follow + AI context or Follow locally only. Native macOS permission is still required. No manual window or tab selection. The existing allowlist and foreground-window capture apply; unsupported apps, own overlay and full-display capture are excluded. Browser tabs can still contain sensitive data. Use Stop before opening private material.
+
+Local OCR runs every ~15 seconds when compact. With separate AI consent, a user-initiated generated chat turn attempts a fresh capture (including while expanded), not the previous cached tab. At most 600 characters are included, as untrusted data, with the Groq request. No screenshots, raw OCR files, background AI requests or new paid services. The existing shared 20-attempt UTC-day budget applies, with at least five seconds between chat-context attempts and one minute before a separately reviewed analysis. Screen-derived replies are not retained in conversation history. On no fresh text / budget exhaustion the reply is ordinary chat and the footer reports no screen text used. Direct commands remain functional; screen-context model replies cannot propose actions. Revocation clears observation; an already dispatched network request cannot be recalled.
+
+Expanded panel is 436×550 logical pixels maximum, clamped to monitor work area. Scrollable response area and persistent input; native panel conversion unchanged. No promise of full Parakeet feature parity, visual image reasoning or autonomous semantic check-ins.
+
+Test: opt in, switch between clearly distinct non-sensitive browser tabs, ask What am I working on? Verify screen-context footer and correct content. Switch to another supported app, repeat. Check stop and local-only mode. Test resize near screen edges and first-click dragging. Verify budget, permissions, native build, CPU/memory and existing chat actions.

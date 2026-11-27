@@ -126,10 +126,16 @@ fn intelligence_provider() -> Result<intelligence::Provider, String> { intellige
 
 // Model output is a reply or a bounded proposal, never a native action.
 #[tauri::command]
-async fn local_companion_reply(store: State<'_, SessionStore>, screen: State<'_, screen::ScreenState>, message: String, history: Vec<intelligence::PreviousTurn>) -> Result<intelligence::ModelReply, String> {
+async fn local_companion_reply(app: tauri::AppHandle, store: State<'_, SessionStore>, screen: State<'_, screen::ScreenState>, message: String, history: Vec<intelligence::PreviousTurn>) -> Result<intelligence::ModelReply, String> {
+    let excerpt = screen::chat_context(&app).await;
     let snapshot = store.snapshot()?;
     let screen_active = screen::observation_active(&screen);
-    tauri::async_runtime::spawn_blocking(move || intelligence::generate(&message, &snapshot, &history, screen_active))
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app.state::<screen::ScreenState>();
+        let text = excerpt.as_ref().filter(|context| screen::cloud_context_active(&state, context) && snapshot.phase == model::Phase::Running).map(|context| context.text.as_str());
+        intelligence::generate(&message, &snapshot, &history, screen_active, text)
+    })
         .await.map_err(|_| "Local intelligence worker failed".to_owned())?
 }
 
@@ -239,7 +245,7 @@ pub fn run() {
             finish_companion_drag, cancel_companion_drag,
             overlay::load_overlay_draft, overlay::hide_companion, overlay::panel_keyboard,
             awareness::set_awareness, awareness::awareness_status, awareness::sample_awareness, awareness::suspend_awareness,
-            screen::screen_status, screen::request_screen_permission, screen::list_screen_windows,
+            screen::screen_status, screen::request_screen_permission, screen::start_follow_screen, screen::list_screen_windows,
             screen::select_screen_window, screen::sample_screen, screen::stop_screen,
             screen::preview_screen, screen::analyze_screen
         ])

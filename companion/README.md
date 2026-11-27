@@ -57,3 +57,7 @@ See [SCREEN_AWARENESS_V011.md](SCREEN_AWARENESS_V011.md). User-selected foregrou
 ## v0.11.1 ambient overlay repair
 
 See [AMBIENT_OVERLAY_V0111.md](AMBIENT_OVERLAY_V0111.md). Experimental non-activating macOS panel, native OCR scheduler, explicit follow-work-apps mode, preserved ordinary replies and passive check-ins. Cloud screen analysis still requires reviewed approval.
+
+## v0.11.2 automatic foreground following
+
+See [FOLLOW_CONTEXT_V0112.md](FOLLOW_CONTEXT_V0112.md). One session opt-in, no window chooser, optional Groq chat-time screen context, larger bounded native panel. No background cloud observation.
