@@ -25,7 +25,7 @@ export type ModelReply = { provider: Provider; model: string; screen_context_use
 export type AwarenessCue = "leisure_check" | "return_check";
 export type AwarenessStatus = { enabled: boolean; supported: boolean; category: "leisure" | "browser" | "other" | "unavailable"; cue: AwarenessCue | null };
 
-export type ScreenStatus = { supported: boolean; active: boolean; app: string | null; sample_ready: boolean; detail: string; cue: boolean; cloud_context: boolean; monitoring: boolean; relevance: "related" | "possible_distraction" | "unknown" };
+export type ScreenStatus = { supported: boolean; active: boolean; app: string | null; sample_ready: boolean; detail: string; cue: boolean; cloud_context: boolean; monitoring: boolean; relevance: "related" | "possible_distraction" | "unknown"; analysis_detail: string };
 export type WindowChoice = { id: number; pid: number; bundle: string; app: string; title: string };
 export type ScreenPreview = { id: number; excerpt: string; goal: string; remaining_today: number; valid_for_ms: number };
 

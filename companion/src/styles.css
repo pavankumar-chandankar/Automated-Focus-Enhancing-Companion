@@ -169,3 +169,19 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .analytics-legend div { display:flex; align-items:center; gap:8px; font-size:13px; }
 .analytics-legend strong { margin-left:auto; font-variant-numeric:tabular-nums; }
 .analytics-legend i { width:10px; height:10px; border-radius:3px; flex:none; }
+
+/* v0.12.1: compact layout. Keep the 342×420 native size and give the
+   actual conversation a protected grid row instead of squeezing it. */
+.is-expanded { display: grid; grid-template-rows: 150px minmax(0, 1fr); }
+.is-expanded .character-stage { width: 192px; height: 150px; }
+.is-expanded .character-button { width: 138px; height: 123px; margin: 0 27px; }
+.is-expanded .character-status { bottom: 1px; }
+.is-expanded .conversation-bubble { display: grid; grid-template-rows: auto minmax(0,1fr) auto auto auto; min-height: 0; height: auto; margin: 4px 7px 8px; padding: 9px 11px; gap: 5px; }
+.conversation-heading { min-height: 25px; padding-bottom: 4px; margin: 0; }
+.conversation-content { min-height: 0; overflow-y: auto; padding: 0 4px 4px 0; overscroll-behavior: contain; }
+.companion-reply { margin: 2px 0 8px; line-height: 1.45; }
+.conversation-form { min-height: 35px; }
+.conversation-note { margin: 0; line-height: 1.3; overflow-wrap: anywhere; }
+.screen-footer { margin: 0; min-height: 21px; }
+.screen-diagnostics { border-top: 1px solid #e8e1f2; padding-top: 4px; }
+.screen-controls label { margin: 3px 0 2px; }

@@ -15,3 +15,7 @@ Read reliability textbook, give actual goal, choose monitoring, fold bubble and 
 For a deictic goal such as “read this document,” start on the intended document. The first readable titled work window is treated as the user-selected reference and its title can be shared in the reasoning goal; if wrong, stop and begin again. Ordinary non-screen chat retains action proposals. Conservative title/content exclusions are incomplete. OCR evidence is data rather than system instructions.
 
 The native background inference slot is separate from ordinary chat, but both share Groq rate-limit cooldown. Hiding the companion also closes an open analytics window to avoid a residual window. Title reference stays in RAM and is used in authorized background classification, not appended to unrelated chat prompts.
+
+## v0.12.1 stability correction
+
+Compact window remains 342×420. Character height reduces only while chat is open, with protected scrolling reply area and pinned composer. Detailed observation status and errors move into scroll content; failed AI turns retain the input for retry and show the actual sanitized native error. Analytics displays elapsed time since monitoring began, not the persisted focus session's wall clock. Polite observation requests are not goals. Background provider failures are reported and not cached as successful uncertain classifications; retries are bounded by the existing budget/cooldown. Terminal and the analytics app itself remain excluded from capture. Underlying persisted focus timer semantics remain unchanged.
