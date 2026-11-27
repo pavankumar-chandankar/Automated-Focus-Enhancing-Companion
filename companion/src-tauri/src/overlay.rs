@@ -7,6 +7,8 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, WebviewWindowBuil
 use tauri_nspanel::{ManagerExt, WebviewWindowExt, StyleMask};
 #[cfg(target_os = "macos")]
 use tauri_nspanel::objc2_foundation::NSObjectProtocol;
+#[cfg(target_os = "macos")]
+use tauri_nspanel::objc2::{ClassType, Message};
 
 #[cfg(target_os = "macos")]
 tauri_nspanel::panel!(OplyraPanel {
