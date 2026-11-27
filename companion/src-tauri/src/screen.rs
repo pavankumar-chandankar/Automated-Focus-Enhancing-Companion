@@ -71,6 +71,7 @@ struct Observation {
     cues: u8,
     cloud_context: bool,
     switch_watch: bool,
+    folded: bool,
     switch_guard: SwitchGuard,
     monitor: Monitor,
     relevance: Option<Relevance>,
@@ -87,6 +88,7 @@ impl Observation {
         self.selection = None;
         self.cloud_context = false;
         self.switch_watch = false;
+        self.folded = false;
         self.switch_guard = SwitchGuard::default();
         self.monitor.clear_context();
         self.relevance = None;
@@ -483,17 +485,40 @@ pub fn dismiss_cue(app: &AppHandle) {
 #[tauri::command]
 pub fn dismiss_focus_cue(app: AppHandle) { dismiss_cue(&app); }
 
-fn post_cue(app: &AppHandle, generation: u64, is_switch: bool) {
+#[tauri::command]
+pub fn set_monitor_folded(app: AppHandle, state: State<'_, ScreenState>, folded: bool) -> Result<(), String> {
+    let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
+    o.folded = folded;
+    if !folded { o.switch_guard.gap(); }
+    drop(o);
+    if !folded { dismiss_cue(&app); }
+    Ok(())
+}
+
+pub fn test_cue(app: &AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
-        if !compact_running(&handle) { return; }
+        if let Some(window) = handle.get_webview_window("main") {
+            let shown = platform::show_cue(&window, 3);
+            eprintln!("[Oplyra reminder] native test displayed={shown} (close chat first)");
+            let _ = window.emit("oplyra-focus-cue", ("Hi! Your reminder bubble works.", shown));
+        }
+    });
+}
+
+fn post_cue(app: &AppHandle, generation: u64, kind: i32) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if !capture_allowed(&handle) { return; }
+        if kind == 0 && !compact_running(&handle) { return; }
         let allowed = handle.state::<ScreenState>().observation.lock().map(|o|
             o.generation == generation && o.selection.is_some() &&
-            (if is_switch { o.switch_watch && o.switch_guard.away() } else { o.cloud_context })).unwrap_or(false);
+            (if kind == 2 { o.switch_watch && o.folded && o.switch_guard.on_reference() } else if kind == 1 { o.switch_watch && o.folded && o.switch_guard.away() } else { o.cloud_context })).unwrap_or(false);
         if !allowed { return; }
         if let Some(window) = handle.get_webview_window("main") {
-            let shown = platform::show_cue(&window, is_switch);
-            let text = if is_switch { "Hey, switched tabs. Back to your focus?" } else { "Hey, still on your task? Ready to get back to it?" };
+            let shown = platform::show_cue(&window, kind);
+            eprintln!("[Oplyra reminder] kind={kind} native_displayed={shown}");
+            let text = match kind { 2 => "Focus tab set. I’ll keep you on track.", 1 => "Hey, switched tabs. Back to your focus?", _ => "Hey, still on your task? Ready to get back to it?" };
             let _ = window.emit("oplyra-focus-cue", (text, shown));
         }
     });
@@ -505,17 +530,19 @@ fn switch_tick(app: &AppHandle, generation: u64) -> Result<ScreenStatus, String>
         if o.generation == generation { o.reset(); }
         return Ok(o.status());
     }
-    if !compact_running(app) {
+    {
         let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
-        if o.generation == generation { o.switch_guard.gap(); }
-        return Ok(o.status());
+        if o.generation != generation || !o.folded || !capture_allowed(app) {
+            if o.generation == generation { o.switch_guard.gap(); }
+            return Ok(o.status());
+        }
     }
     let identity = platform::foreground_identity();
-    let compact = compact_running(app);
+    let allowed = capture_allowed(app);
     let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
     if o.generation != generation || !o.switch_watch { return Ok(o.status()); }
-    if !compact { o.switch_guard.gap(); return Ok(o.status()); }
-    let identity = match identity {
+    if !o.folded || !allowed { o.switch_guard.gap(); return Ok(o.status()); }
+    let (identity, reason) = match identity {
         Ok(v) => v,
         Err(e) => { o.reset(); return Err(e); }
     };
@@ -523,7 +550,9 @@ fn switch_tick(app: &AppHandle, generation: u64) -> Result<ScreenStatus, String>
     o.monitor.metrics.unknown += 1;
     let Some(identity) = identity else {
         o.switch_guard.gap();
-        o.detail = "Waiting for a titled supported foreground tab".into();
+        let detail = reason.unwrap_or_else(|| "Waiting for a titled supported foreground tab".into());
+        if o.detail != detail { eprintln!("[Oplyra monitor] {detail}"); }
+        o.detail = detail;
         return Ok(o.status());
     };
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -537,14 +566,16 @@ fn switch_tick(app: &AppHandle, generation: u64) -> Result<ScreenStatus, String>
         else if u.cue { "Tab changed · reminder offered" } else { "Different tab · watching for return" }.into();
     let mut status = o.status(); status.cue = u.cue;
     drop(o);
-    if u.returned { dismiss_cue(app); }
+    if u.anchored { eprintln!("[Oplyra monitor] reference registered"); post_cue(app, generation, 2); }
+    if u.changed { eprintln!("[Oplyra monitor] foreground identity changed"); }
+    if u.returned { eprintln!("[Oplyra monitor] returned to reference"); dismiss_cue(app); }
     Ok(status)
 }
 fn publish_status(app: &AppHandle, generation: u64, result: Result<ScreenStatus, String>, is_switch: bool) {
     if let Some(window) = app.get_webview_window("main") {
         match result {
             Ok(mut status) => {
-                if status.cue { post_cue(app, generation, is_switch); status.cue = false; }
+                if status.cue { post_cue(app, generation, if is_switch { 1 } else { 0 }); status.cue = false; }
                 let _ = window.emit("oplyra-screen-status", status);
             }
             Err(error) => { dismiss_cue(app); let _ = window.emit("oplyra-screen-error", error); }
@@ -658,7 +689,7 @@ mod platform {
         fn oplyra_dismiss_focus_cue();
     }
     #[derive(Deserialize)]
-    struct ResultData { error: Option<String>, windows: Option<Vec<WindowChoice>>, text: Option<String>, inactive: Option<bool> }
+    struct ResultData { error: Option<String>, windows: Option<Vec<WindowChoice>>, text: Option<String>, inactive: Option<bool>, reason: Option<String> }
     fn decode(ptr: *mut c_char) -> Result<ResultData, String> {
         if ptr.is_null() { return Err("Native capture unavailable".into()); }
         let result = unsafe {
@@ -670,12 +701,12 @@ mod platform {
         if let Some(ref error) = result.error { return Err(error.clone()); }
         Ok(result)
     }
-    pub fn foreground_identity() -> Result<Option<String>, String> {
+    pub fn foreground_identity() -> Result<(Option<String>, Option<String>), String> {
         let result = decode(unsafe { oplyra_foreground_identity() })?;
-        if result.inactive == Some(true) { Ok(None) } else { Ok(result.text) }
+        if result.inactive == Some(true) { Ok((None, result.reason)) } else { Ok((result.text, None)) }
     }
-    pub fn show_cue(window: &tauri::WebviewWindow, is_switch: bool) -> bool {
-        window.ns_window().ok().is_some_and(|ptr| unsafe { oplyra_show_focus_cue(ptr, if is_switch { 1 } else { 0 }) != 0 })
+    pub fn show_cue(window: &tauri::WebviewWindow, kind: i32) -> bool {
+        window.ns_window().ok().is_some_and(|ptr| unsafe { oplyra_show_focus_cue(ptr, kind) != 0 })
     }
     pub fn dismiss_cue() { unsafe { oplyra_dismiss_focus_cue() } }
     pub fn supported() -> bool { unsafe { oplyra_screen_supported() != 0 } }
@@ -692,8 +723,8 @@ mod platform {
 #[cfg(not(target_os = "macos"))]
 mod platform {
     use super::*;
-    pub fn foreground_identity() -> Result<Option<String>, String> { Ok(None) }
-    pub fn show_cue(_: &tauri::WebviewWindow, _: bool) -> bool { false }
+    pub fn foreground_identity() -> Result<(Option<String>, Option<String>), String> { Ok((None, None)) }
+    pub fn show_cue(_: &tauri::WebviewWindow, _: i32) -> bool { false }
     pub fn supported() -> bool { false }
     pub fn request_permission() -> bool { false }
     pub fn list() -> Result<Vec<WindowChoice>, String> { Err("Screen observation is macOS-only".into()) }

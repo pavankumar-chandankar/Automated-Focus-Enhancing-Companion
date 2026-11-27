@@ -34,6 +34,7 @@ export type AnalyticsSnapshot = { goal: string; elapsed_ms: number; phase: Phase
 export const companion = {
   startFollowScreen: (cloud: boolean, goal: string, switchWatch = false) => invoke<ScreenStatus>("start_follow_screen", { cloud, goal, switchWatch }),
   dismissFocusCue: () => invoke<void>("dismiss_focus_cue"),
+  setMonitorFolded: (folded: boolean) => invoke<void>("set_monitor_folded", { folded }),
   openAnalytics: () => invoke<void>("open_analytics"),
   analytics: () => invoke<AnalyticsSnapshot>("get_analytics"),
   panelKeyboard: (enabled: boolean) => invoke<void>("panel_keyboard", { enabled }),

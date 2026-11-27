@@ -232,8 +232,9 @@ pub fn run() {
             let stop_awareness = MenuItem::with_id(app, "stop-awareness", "Stop activity awareness", true, None::<&str>)?;
             let stop_screen = MenuItem::with_id(app, "stop-screen", "Stop screen observation", true, None::<&str>)?;
             let analytics = MenuItem::with_id(app, "analytics", "Open analytics", true, None::<&str>)?;
+            let test_cue = MenuItem::with_id(app, "test-cue", "Test reminder bubble", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &hide, &analytics, &stop_awareness, &stop_screen, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &hide, &analytics, &test_cue, &stop_awareness, &stop_screen, &quit])?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("app icon").clone())
                 .tooltip("Oplyra")
@@ -244,6 +245,7 @@ pub fn run() {
                     "hide" => overlay::request_hide(app),
                     "stop-awareness" => awareness::stop(app),
                     "stop-screen" => screen::stop(app),
+                    "test-cue" => screen::test_cue(app),
                     "analytics" => { let handle = app.clone(); tauri::async_runtime::spawn(async move { let _ = open_analytics(handle).await; }); },
                     "quit" => app.exit(0),
                     _ => {}
@@ -268,7 +270,7 @@ pub fn run() {
             awareness::set_awareness, awareness::awareness_status, awareness::sample_awareness, awareness::suspend_awareness,
             screen::screen_status, screen::request_screen_permission, screen::start_follow_screen, screen::list_screen_windows,
             screen::select_screen_window, screen::sample_screen, screen::stop_screen,
-            screen::preview_screen, screen::analyze_screen, screen::get_analytics, screen::dismiss_focus_cue, open_analytics
+            screen::preview_screen, screen::analyze_screen, screen::get_analytics, screen::dismiss_focus_cue, screen::set_monitor_folded, open_analytics
         ])
         .build(tauri::generate_context!())
         .expect("error while building Oplyra desktop")

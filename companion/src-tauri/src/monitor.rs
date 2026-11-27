@@ -106,7 +106,7 @@ pub struct SwitchGuard {
     reminded: bool,
 }
 #[derive(Default)]
-pub struct SwitchUpdate { pub changed: bool, pub returned: bool, pub cue: bool }
+pub struct SwitchUpdate { pub anchored: bool, pub changed: bool, pub returned: bool, pub cue: bool }
 impl SwitchGuard {
     pub fn gap(&mut self) { self.last = None; self.since = None; self.last_seen = None; }
     pub fn sample(&mut self, now: Instant, key: u64) -> SwitchUpdate {
@@ -115,7 +115,7 @@ impl SwitchGuard {
         self.last_seen = Some(now);
         if self.anchor.is_none() {
             self.anchor = Some(key); self.last = Some(key); self.since = Some(now);
-            return u;
+            u.anchored = true; return u;
         }
         if self.last != Some(key) {
             u.changed = self.last.is_some();
@@ -143,7 +143,7 @@ mod tests {
     fn switch_guard_reminds_without_classifier_and_rearms_on_return() {
         let t = Instant::now(); let at = |s| t + Duration::from_secs(s);
         let mut g = SwitchGuard::default();
-        assert!(!g.sample(at(0), 1).cue);
+        let initial = g.sample(at(0), 1); assert!(initial.anchored); assert!(!initial.cue);
         assert!(g.on_reference());
         assert!(!g.sample(at(2), 2).cue);
         assert!(!g.sample(at(4), 2).cue);

@@ -167,7 +167,7 @@ function CompanionApp() {
       });
       if (disposed) { second(); return; } cleanups.push(second);
       const third = await appWindow.listen<[string, boolean]>("oplyra-focus-cue", ({payload}) => {
-        if (!disposed && screenActive.current && !hiding.current) showAmbient(payload[0], payload[1]);
+        if (!disposed && !hiding.current) showAmbient(payload[0], payload[1]);
       });
       if (disposed) third(); else cleanups.push(third);
     };
@@ -201,7 +201,7 @@ function CompanionApp() {
       clearScreenPanel();
       screenActive.current = status.active;
       setScreen(status);
-      setReply(switchWatch ? "Close this bubble on your intended tab. I’ll remind you when you stay on a different tab, even without internet." : cloud ? "I’ll keep track of your goal and gently check in if a sustained change looks unrelated. Carry on; you don’t need to chat with me." : "I’ll observe supported apps locally. Semantic distraction assessment is off.");
+      setReply(switchWatch ? "Close chat and click your work tab. Wait for ‘Focus tab set’ before switching. I’ll remind you without internet." : cloud ? "I’ll keep track of your goal and gently check in if a sustained change looks unrelated. Carry on; you don’t need to chat with me." : "I’ll observe supported apps locally. Semantic distraction assessment is off.");
       setSource("command");
     });
   }
@@ -334,7 +334,7 @@ function CompanionApp() {
 
   async function toggleDetails(open: boolean) {
     if (resizing) return;
-    if (open) void companion.dismissFocusCue().catch(() => {});
+    if (open) void companion.setMonitorFolded(false).catch(() => {});
     setResizing(true);
     if (!open) {
       visibilityEpoch.current += 1;
@@ -342,7 +342,7 @@ function CompanionApp() {
         setReply("Ready when you are."); setSource(null);
       }
       pendingAction.current = null; awarenessPending.current = null; clearScreenPanel();
-      void companion.panelKeyboard(false).catch(() => {});
+      await companion.panelKeyboard(false).catch(() => {});
     }
     else { screenEpoch.current += 1; }
     if (open && awareness?.enabled) {
@@ -367,6 +367,7 @@ function CompanionApp() {
       expandedRef.current = open;
       visibilityEpoch.current += 1;
       setExpanded(open);
+      await companion.setMonitorFolded(!open);
       // Folding is presentation only; keep the latest ordinary reply and chat history.
       if (open) setAmbientCue("");
       if (open && checkIn && performance.now() < checkInExpiry.current) {

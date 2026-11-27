@@ -181,26 +181,57 @@ char *oplyra_screen_capture(uint32_t wid, int32_t pid, const char *bundle_utf8) 
 
 
 // Metadata only: no pixel capture, OCR, browser extensions or URLs.
+static char *identity_wait(NSString *reason) {
+    return json_result(@{@"inactive":@YES, @"reason":reason});
+}
+static BOOL private_title(NSString *title) {
+    NSString *lower = title.lowercaseString;
+    for (NSString *term in @[@"password", @"sign in", @"log in", @"login", @"incognito", @"private browsing", @"online banking", @"passwort", @"anmelden"]) {
+        if ([lower containsString:term]) return YES;
+    }
+    return NO;
+}
 char *oplyra_foreground_identity(void) {
     @autoreleasepool {
         if (@available(macOS 14.0, *)) {
             if (!CGPreflightScreenCaptureAccess()) return failure(@"Screen recording permission was revoked");
             NSRunningApplication *active = NSWorkspace.sharedWorkspace.frontmostApplication;
-            if (!active || active.processIdentifier == getpid() || !allowed_bundle(active.bundleIdentifier))
-                return json_result(@{@"inactive":@YES});
+            if (!active || active.processIdentifier == getpid())
+                return identity_wait(@"Click your work tab once; Oplyra is currently active");
+            if (!allowed_bundle(active.bundleIdentifier))
+                return identity_wait(@"Open a supported work app (Chrome, Safari, Preview or similar)");
+            // Read fresh WindowServer metadata first. Avoid dependence on
+            // ScreenCaptureKit enumeration when a current title is available.
+            CFArrayRef raw = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly |
+                kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+            if (!raw) return identity_wait(@"WindowServer metadata unavailable");
+            NSArray *ordered = CFBridgingRelease(raw);
+            for (NSDictionary *info in ordered) {
+                if ([info[(__bridge NSString *)kCGWindowOwnerPID] intValue] != active.processIdentifier ||
+                    [info[(__bridge NSString *)kCGWindowLayer] intValue] != 0) continue;
+                CGRect bounds = CGRectZero;
+                NSDictionary *dict = info[(__bridge NSString *)kCGWindowBounds];
+                if (!dict || !CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)dict, &bounds) ||
+                    bounds.size.width < 200 || bounds.size.height < 120) continue;
+                NSString *title = info[(__bridge NSString *)kCGWindowName];
+                if (title.length < 2) break; // do not select a different background window
+                if (private_title(title)) return identity_wait(@"Private window skipped");
+                if (NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != active.processIdentifier)
+                    return identity_wait(@"Foreground application changed during check");
+                uint32_t wid = [info[(__bridge NSString *)kCGWindowNumber] unsignedIntValue];
+                return json_result(@{@"text":[NSString stringWithFormat:@"%@|%u|%@", active.bundleIdentifier, wid, bounded(title,240)]});
+            }
+            // Some macOS/browser combinations expose titles only through SCK.
             SCShareableContent *content = shareable();
-            if (!content) return json_result(@{@"inactive":@YES});
+            if (!content) return identity_wait(@"Could not enumerate work windows");
             SCWindow *window = foreground_choice(content, 0, 0, @"");
             if (!window || window.owningApplication.processID != active.processIdentifier ||
                 NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != active.processIdentifier)
-                return json_result(@{@"inactive":@YES});
+                return identity_wait(@"No eligible foreground work window");
             NSString *title = window.title;
-            if (title.length < 2) return json_result(@{@"inactive":@YES});
-            NSString *lower = title.lowercaseString;
-            for (NSString *term in @[@"password", @"sign in", @"log in", @"login", @"incognito", @"private browsing", @"online banking", @"passwort", @"anmelden"]) {
-                if ([lower containsString:term]) return json_result(@{@"inactive":@YES});
-            }
-            return json_result(@{@"text":[NSString stringWithFormat:@"%@|%u|%@", active.bundleIdentifier, window.windowID, bounded(title, 240)]});
+            if (title.length < 2) return identity_wait(@"Browser/window title unavailable");
+            if (private_title(title)) return identity_wait(@"Private window skipped");
+            return json_result(@{@"text":[NSString stringWithFormat:@"%@|%u|%@", active.bundleIdentifier, window.windowID, bounded(title,240)]});
         }
         return failure(@"Tab reminders require macOS 14 or newer");
     }
@@ -257,7 +288,7 @@ void oplyra_dismiss_focus_cue(void) {
     ++cue_epoch;
     if (cue_panel) { [cue_panel orderOut:nil]; [cue_panel close]; cue_panel = nil; }
 }
-int oplyra_show_focus_cue(void *raw_anchor, int is_switch) {
+int oplyra_show_focus_cue(void *raw_anchor, int kind) {
     @autoreleasepool {
         if (![NSThread isMainThread] || !raw_anchor) return 0;
         NSWindow *anchor = (__bridge NSWindow *)raw_anchor;
@@ -287,7 +318,7 @@ int oplyra_show_focus_cue(void *raw_anchor, int is_switch) {
         panel.level = anchor.level + 1;
         OplyraCueView *view = [[OplyraCueView alloc] initWithFrame:NSMakeRect(0,0,width,height)];
         view.side = side;
-        view.message = is_switch ? @"Hey, switched tabs. Back to your focus?" : @"Hey, still on your task? Ready to get back to it?";
+        view.message = kind == 2 ? @"Focus tab set. I’ll keep you on track." : kind == 3 ? @"Hi! Your reminder bubble works." : kind == 1 ? @"Hey, switched tabs. Back to your focus?" : @"Hey, still on your task? Ready to get back to it?";
         panel.contentView = view;
         cue_panel = panel;
         [panel orderFrontRegardless];
