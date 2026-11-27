@@ -7,7 +7,7 @@ const input = await readFile(new URL("../src/dialogue.ts", import.meta.url), "ut
 const { outputText } = ts.transpileModule(input, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
 });
-const { planMessage, restingBehaviour, actionAllowed, confirmedPlan, resolveConfirmation, proposalQuestion, rememberTurn, awarenessCommand, screenCommand } = await import("data:text/javascript;base64," + Buffer.from(outputText).toString("base64"));
+const { planMessage, restingBehaviour, actionAllowed, confirmedPlan, resolveConfirmation, proposalQuestion, rememberTurn, awarenessCommand, screenCommand, monitoringRequest, monitoringGoalFromRequest } = await import("data:text/javascript;base64," + Buffer.from(outputText).toString("base64"));
 const cases = [
   ["Let's study together.", "idle", "start", "working"],
   ["I need to work on my paper", "idle", "start", "working"],
@@ -97,3 +97,16 @@ assert.equal(screenCommand("Follow my work"), "choose");
 assert.equal(screenCommand("What am I working on?"), "preview");
 assert.equal(screenCommand("Summarize my screen"), "preview");
 assert.equal(screenCommand("Don't follow my screen"), null);
+
+assert.equal(monitoringRequest("I am reading this document and get me on track if I get diverted"), true);
+assert.equal(monitoringRequest("Remind me if I switch tabs"), true);
+assert.equal(monitoringRequest("Don't keep me on track"), false);
+assert.equal(monitoringRequest("What if you watch my screen?"), false);
+console.log("Natural monitoring request routing assertions passed.");
+
+assert.equal(screenCommand("Please watch my screen"), "choose");
+assert.equal(monitoringGoalFromRequest("Please watch my screen", "please watch my screen"), "");
+assert.equal(monitoringGoalFromRequest("Please watch my screen", "Read reliability theory"), "Read reliability theory");
+assert.equal(monitoringGoalFromRequest("I am reading this document and get me on track if I get diverted", ""), "I am reading this document");
+assert.equal(monitoringGoalFromRequest("Remind me if I switch tabs", ""), "");
+console.log("Monitoring goal extraction assertions passed.");

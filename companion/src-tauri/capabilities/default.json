@@ -3,7 +3,8 @@
   "identifier": "main",
   "description": "Transparent, user-controlled character; pointer-movement native position changes and Rust-owned drop target",
   "windows": [
-    "main"
+    "main",
+    "analytics"
   ],
   "permissions": [
     "core:default",

@@ -4,6 +4,8 @@ use crate::{model::Phase, SessionStore};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::{Path, PathBuf}, sync::Mutex, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 use tauri::{AppHandle, Emitter, Manager, State};
+use crate::monitor::{Monitor, Metrics, Relevance};
+use std::hash::{Hash, Hasher};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(15);
 const FRESHNESS: Duration = Duration::from_secs(60);
@@ -29,6 +31,9 @@ pub struct ScreenStatus {
     detail: String,
     cue: bool,
     cloud_context: bool,
+    monitoring: bool,
+    relevance: Relevance,
+    analysis_detail: String,
 }
 
 #[derive(Clone)]
@@ -63,22 +68,35 @@ struct Observation {
     last_cue: Option<Instant>,
     cues: u8,
     cloud_context: bool,
+    monitor: Monitor,
+    relevance: Option<Relevance>,
+    monitoring_started: Option<Instant>,
+    monitoring_elapsed_ms: u64,
+    analysis_detail: String,
 }
 impl Observation {
     fn reset(&mut self) {
+        if let Some(started) = self.monitoring_started.take() {
+            self.monitoring_elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        }
         self.generation = self.generation.wrapping_add(1);
         self.selection = None;
         self.cloud_context = false;
+        self.monitor.clear_context();
+        self.relevance = None;
         self.choices.clear();
         self.listed_at = None;
         self.last_attempt = None;
         self.latest = None;
         self.reviewed = None;
-        self.detail.clear(); self.missing_since = None; self.last_cue = None; self.cues = 0;
+        self.detail.clear(); self.analysis_detail.clear(); self.missing_since = None; self.last_cue = None; self.cues = 0;
         // A worker already in progress must finish before another starts.
     }
     fn fresh(&self, now: Instant) -> Option<&Sample> {
         self.latest.as_ref().filter(|s| now.saturating_duration_since(s.at) < FRESHNESS)
+    }
+    fn elapsed_ms(&self) -> u64 {
+        self.monitoring_started.map(|t| t.elapsed().as_millis().min(u128::from(u64::MAX)) as u64).unwrap_or(self.monitoring_elapsed_ms)
     }
     fn status(&self) -> ScreenStatus {
         ScreenStatus {
@@ -87,6 +105,8 @@ impl Observation {
             app: self.selection.as_ref().map(|w| w.app.clone()),
             sample_ready: self.fresh(Instant::now()).is_some(),
             detail: self.detail.clone(), cue: false, cloud_context: self.cloud_context,
+            monitoring: self.cloud_context && !self.monitor.goal.is_empty(), relevance: self.relevance.unwrap_or(Relevance::Unknown),
+            analysis_detail: self.analysis_detail.clone(),
         }
     }
 }
@@ -146,6 +166,9 @@ fn visible_running(app: &AppHandle) -> bool {
     app.state::<SessionStore>().snapshot().is_ok_and(|s| s.phase == Phase::Running) &&
         app.get_webview_window("main").and_then(|w| w.is_visible().ok()).unwrap_or(false)
 }
+fn capture_allowed(app: &AppHandle) -> bool {
+    visible_running(app) && app.get_webview_window("drop-zone").is_none()
+}
 fn compact_running(app: &AppHandle) -> bool {
     visible_running(app) && app.get_webview_window("drop-zone").is_none() &&
         app.get_webview_window("main").is_some_and(|w| {
@@ -157,15 +180,26 @@ fn compact_running(app: &AppHandle) -> bool {
 }
 
 pub fn stop(app: &AppHandle) {
+    let mut was_active = false;
     if let Some(state) = app.try_state::<ScreenState>() {
-        if let Ok(mut observation) = state.observation.lock() { observation.reset(); }
+        if let Ok(mut observation) = state.observation.lock() {
+            was_active = observation.selection.is_some();
+            observation.reset();
+        }
     }
-    if let Some(window) = app.get_webview_window("main") { let _ = window.emit("oplyra-screen-stopped", ()); }
+    if was_active {
+        if let Some(window) = app.get_webview_window("main") { let _ = window.emit("oplyra-screen-stopped", ()); }
+    }
 }
 #[tauri::command]
 pub fn stop_screen(state: State<'_, ScreenState>) -> Result<(), String> {
     state.observation.lock().map_err(|_| "Screen state unavailable")?.reset();
     Ok(())
+}
+
+pub fn monitoring_goal(state: &ScreenState) -> Option<String> {
+    let o = state.observation.lock().ok()?;
+    if o.selection.is_some() && !o.monitor.goal.is_empty() { Some(o.monitor.goal.clone()) } else { None }
 }
 
 pub fn observation_active(state: &ScreenState) -> bool {
@@ -190,7 +224,9 @@ pub fn request_screen_permission(app: AppHandle) -> Result<(), String> {
 // Explicit session opt-in, no window chooser. This does not bypass the OS
 // permission, app allowlist or running-session/visibility gates.
 #[tauri::command]
-pub fn start_follow_screen(app: AppHandle, state: State<'_, ScreenState>, cloud: bool) -> Result<ScreenStatus, String> {
+pub fn start_follow_screen(app: AppHandle, state: State<'_, ScreenState>, cloud: bool, goal: String) -> Result<ScreenStatus, String> {
+    let goal = goal.chars().filter(|c| !c.is_control() || *c == '\n').take(160).collect::<String>().trim().to_owned();
+    if cloud && goal.is_empty() { return Err("Tell me what you want to focus on first".into()); }
     if cloud && crate::intelligence::configured_provider()? != crate::intelligence::Provider::Groq {
         return Err("AI screen context requires the Groq provider".into());
     }
@@ -202,6 +238,11 @@ pub fn start_follow_screen(app: AppHandle, state: State<'_, ScreenState>, cloud:
     o.reset();
     o.selection = Some(WindowChoice { id: 0, pid: 0, bundle: String::new(), app: "Foreground work apps".into(), title: String::new() });
     o.cloud_context = cloud;
+    o.monitor = Monitor::default();
+    o.monitor.goal = goal;
+    o.monitoring_started = Some(Instant::now());
+    o.monitoring_elapsed_ms = 0;
+    o.analysis_detail = if cloud { "Waiting for sustained work context".into() } else { "Cloud relevance checks off".into() };
     o.detail = "Following supported foreground apps".into();
     Ok(o.status())
 }
@@ -231,7 +272,7 @@ pub async fn chat_context(app: &AppHandle) -> Option<ChatContext> {
     if o.generation != generation || !o.cloud_context || !visible { return None; }
     let text = match result {
         Ok(Ok(Some(text))) => normalize(&text),
-        Ok(Ok(None)) => { o.latest = None; o.reviewed = None; o.detail = "No eligible foreground work window".into(); return None; }
+        Ok(Ok(None)) => { o.latest = None; o.reviewed = None; o.detail = "No supported foreground window; switch to Chrome or a document".into(); return None; }
         _ => { o.reset(); drop(o); let _ = app.emit("oplyra-screen-stopped", ()); return None; }
     };
     if text.is_empty() {
@@ -289,54 +330,136 @@ pub fn select_screen_window(app: AppHandle, state: State<'_, ScreenState>, id: u
 #[tauri::command]
 pub async fn sample_screen(app: AppHandle) -> Result<ScreenStatus, String> {
     let visible = visible_running(&app);
-    let compact = visible && compact_running(&app);
+    let allowed = visible && capture_allowed(&app);
     let (choice, generation) = {
         let state = app.state::<ScreenState>();
         let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
         if !visible { o.reset(); return Ok(o.status()); }
         let Some(choice) = o.selection.clone() else { return Ok(o.status()); };
-        if !compact { o.missing_since = None; return Ok(o.status()); }
+        if !allowed { o.monitor.reset_continuity(); return Ok(o.status()); }
         if o.busy ||
             o.last_attempt.is_some_and(|at| at.elapsed() < SAMPLE_INTERVAL) {
             return Ok(o.status());
         }
-        if o.last_attempt.is_some_and(|at| at.elapsed() > Duration::from_secs(45)) { o.missing_since = None; }
+        if o.last_attempt.is_some_and(|at| at.elapsed() > Duration::from_secs(45)) { o.monitor.reset_continuity(); }
         o.busy = true;
         o.last_attempt = Some(Instant::now());
         (choice, o.generation)
     };
     let result = tauri::async_runtime::spawn_blocking(move || platform::capture(&choice)).await;
     let visible = visible_running(&app);
+    let allowed = visible && capture_allowed(&app);
     let compact = visible && compact_running(&app);
+    let (status, analysis) = {
     let state = app.state::<ScreenState>();
     let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
     o.busy = false;
     if o.generation != generation { return Ok(o.status()); }
     if !visible { o.reset(); return Ok(o.status()); }
-    if !compact { return Ok(o.status()); }
+    if !allowed { o.monitor.reset_continuity(); return Ok(o.status()); }
     o.latest = None;
     o.reviewed = None;
+    let now = Instant::now();
     let mut cue = false;
+    let mut analysis = None;
     match result {
         Ok(Ok(Some(text))) => {
             let text = normalize(&text);
             if !text.is_empty() {
-                let now = Instant::now();
-                // Only a neutral return cue, never a claim of distraction.
-                let returned = o.missing_since.take().is_some_and(|t| t.elapsed() >= Duration::from_secs(120));
-                if returned && o.cues < 2 && o.last_cue.is_none_or(|t| t.elapsed() >= Duration::from_secs(600)) {
-                    o.cues += 1; o.last_cue = Some(now); cue = true;
+                let key = observation_key(&text);
+                if o.cloud_context { o.monitor.anchor_if_requested(key, &text); }
+                let relevance = o.monitor.observe(now, key);
+                o.relevance = Some(relevance);
+                cue = o.cloud_context && o.monitor.should_nudge(now, relevance, compact);
+                o.detail = match relevance {
+                    Relevance::Related => "Appears related to your goal",
+                    Relevance::PossibleDistraction => "Possible diversion",
+                    Relevance::Unknown => "Observed · relevance uncertain",
+                }.into();
+                if o.cloud_context && o.monitor.needs_analysis(now, key) {
+                    if let (Ok(mut budget), Ok(seconds)) = (Budget::read(&state.budget_path), wall_seconds()) {
+                        // Reserve eight of the existing twenty daily attempts for chat.
+                        if budget.remaining(seconds) > 8 && budget.reserve(seconds).is_ok() && budget.save(&state.budget_path).is_ok() {
+                            o.monitor.metrics.analyses += 1;
+                            analysis = Some((key, o.monitor.reasoning_goal(), text.clone()));
+                            o.analysis_detail = "Checking relevance with Groq".into();
+                        } else if budget.remaining(seconds) <= 8 { o.analysis_detail = "Background quota reserved for chat; no new relevance checks".into(); }
+                        else { o.analysis_detail = "Waiting for analysis cooldown or budget storage".into(); }
+                    }
                 }
-                o.detail = "Text recognised locally".into();
                 o.serial = o.serial.checked_add(1).ok_or("Screen sample counter exhausted")?;
-                o.latest = Some(Sample { id: o.serial, at: Instant::now(), text });
-            } else { o.detail = "Captured window; no readable text".into(); o.missing_since = None; }
+                o.latest = Some(Sample { id: o.serial, at: now, text });
+            } else {
+                o.monitor.gap(); o.relevance = None; o.detail = "No reliable readable text".into();
+            }
         }
-        Ok(Ok(None)) => { o.detail = "No eligible foreground work window".into(); o.missing_since.get_or_insert(Instant::now()); }
+        Ok(Ok(None)) => { o.monitor.gap(); o.relevance = None; o.detail = "No supported foreground window; switch to Chrome or a document".into(); }
         Ok(Err(err)) => { o.reset(); return Err(err); }
         Err(_) => { o.reset(); return Err("Screen capture worker failed".into()); }
     }
-    let mut status = o.status(); status.cue = cue; Ok(status)
+    let mut status = o.status(); status.cue = cue;
+    // Do not hold observation lock across inference. Cache only the relevance
+    // label; a subsequent fresh sample must still match before any nudge.
+    (status, analysis)
+    };
+    if let Some((key, goal, text)) = analysis {
+        let worker_app = app.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let state = worker_app.state::<ScreenState>();
+            let allowed = state.observation.lock().map(|o| o.generation == generation && o.cloud_context).unwrap_or(false);
+            if !allowed || !visible_running(&worker_app) { return Err("Monitoring stopped".into()); }
+            crate::intelligence::classify_activity(&goal, &text)
+        }).await.unwrap_or_else(|_| Err("Monitoring worker failed".into()));
+        let state = app.state::<ScreenState>();
+        let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
+        if o.generation == generation && o.cloud_context {
+            match result {
+                Ok(relevance) => { o.monitor.remember(key, relevance); o.analysis_detail = match relevance { Relevance::Related => "Groq: related", Relevance::PossibleDistraction => "Groq: possibly unrelated", Relevance::Unknown => "Groq: uncertain" }.into(); }
+                Err(error) => { o.analysis_detail = format!("Groq check failed: {}", error.chars().take(120).collect::<String>()); }
+            }
+        }
+        // Never publish a stale cue after consent changes.
+        if o.generation != generation { return Ok(o.status()); }
+        let mut updated = o.status(); updated.cue = status.cue; return Ok(updated);
+    }
+    Ok(status)
+}
+
+fn observation_key(text: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let first = text.lines().next().unwrap_or("");
+    // Native title is stable for a document/tab; if unavailable use bounded
+    // content rather than treating all untitled windows as one activity.
+    if first.starts_with("Window: ") && first.len() > 12 { first.hash(&mut hasher); }
+    else { text.hash(&mut hasher); }
+    hasher.finish()
+}
+
+#[derive(Serialize)]
+pub struct Analytics {
+    goal: String,
+    elapsed_ms: u64,
+    phase: Phase,
+    active: bool,
+    monitoring: bool,
+    metrics: Metrics,
+    remaining_today: u32,
+    detail: String,
+}
+#[tauri::command]
+pub fn get_analytics(app: AppHandle, state: State<'_, ScreenState>) -> Result<Analytics, String> {
+    let session = app.state::<SessionStore>().snapshot()?;
+    let o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
+    let remaining_today = Budget::read(&state.budget_path).and_then(|b| Ok(b.remaining(wall_seconds()?))).unwrap_or(0);
+    Ok(Analytics { goal: if o.monitor.goal.is_empty() { session.goal } else { o.monitor.goal.clone() },
+        elapsed_ms: o.elapsed_ms(), phase: session.phase, active: o.selection.is_some(),
+        monitoring: o.cloud_context, metrics: o.monitor.metrics.clone(), remaining_today,
+        detail: [o.detail.as_str(), o.analysis_detail.as_str()].into_iter().filter(|v| !v.is_empty()).collect::<Vec<_>>().join(" · ") })
+}
+pub fn reset_analytics(app: &AppHandle) {
+    if let Some(state) = app.try_state::<ScreenState>() {
+        if let Ok(mut o) = state.observation.lock() { o.monitor = Monitor::default(); o.monitoring_started = None; o.monitoring_elapsed_ms = 0; }
+    }
 }
 
 // Native scheduler: unaffected by WebKit background timer throttling.
@@ -356,7 +479,13 @@ pub fn start_worker(app: AppHandle) {
 }
 
 fn normalize(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control() || *c == '\n').take(600).collect::<String>().trim().to_owned()
+    let text = text.chars().filter(|c| !c.is_control() || *c == '\n').take(600).collect::<String>().trim().to_owned();
+    let lower = text.to_lowercase();
+    // Conservative additional content gate, not comprehensive secret redaction.
+    if ["enter your password", "verification code", "one-time password", "credit card number", "seed phrase", "private key", "api key:", "api key =", "passwort eingeben"].iter().any(|term| lower.contains(*term)) {
+        return String::new();
+    }
+    text
 }
 
 #[tauri::command]
@@ -505,6 +634,15 @@ mod tests {
         assert_eq!(o.generation, 1);
     }
     #[test]
+    fn monitoring_timer_is_independent_of_old_focus_session() {
+        let mut o = Observation::default();
+        o.monitoring_started = Some(Instant::now() - Duration::from_secs(3));
+        assert!(o.elapsed_ms() >= 3000 && o.elapsed_ms() < 5000);
+        o.reset();
+        assert!(o.monitoring_started.is_none());
+        assert!(o.elapsed_ms() >= 3000);
+    }
+    #[test]
     fn expires_and_bounds_ocr() {
         let mut o = Observation::default();
         let t = Instant::now();
@@ -513,5 +651,8 @@ mod tests {
         assert!(o.fresh(t + FRESHNESS).is_none());
         assert_eq!(normalize("A\u{0000}B\nC"), "AB\nC");
         assert_eq!(normalize(&"x".repeat(900)).len(), 600);
+        assert!(normalize("Window: Account\nEnter your password").is_empty());
+        assert_eq!(observation_key("Window: Reliability textbook\npage 1"), observation_key("Window: Reliability textbook\npage 2"));
+        assert_ne!(observation_key("Window: Reliability textbook\npage 1"), observation_key("Window: Music videos\npage 1"));
     }
 }

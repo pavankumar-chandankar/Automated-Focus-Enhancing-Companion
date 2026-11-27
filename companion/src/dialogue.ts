@@ -17,11 +17,31 @@ export function awarenessCommand(input: string): "enable" | "disable" | "status"
   return null;
 }
 
+// Route natural monitoring requests to a consent panel, never auto-enable.
+export function monitoringRequest(input: string): boolean {
+  const t = input.trim().toLowerCase().replace(/[’‘]/g, "'");
+  if (/\b(?:don't|do not|never|stop|disable|should i|what if|hypothetically)\b|["“”]/.test(t)) return false;
+  return /\b(?:keep|get|bring|put)\s+me\s+(?:back\s+)?on\s+track\b|\b(?:remind|nudge|tell|alert)\s+me\b.{0,100}\b(?:distract\w*|divert\w*|switch tabs|off track)\b|\b(?:monitor|follow|watch)\s+my\s+(?:work|screen|tabs)\b/.test(t);
+}
+
+// A consent request is not a task. Extract an explicit task if one was
+// actually stated, otherwise keep a meaningful existing goal or ask.
+export function monitoringGoalFromRequest(input: string, previous: string): string {
+  const clean = (s: string) => Array.from(s.trim().replace(/[.!?]+$/, "")).slice(0,160).join("");
+  const meaningful = (s: string) => !!s.trim() &&
+    !/^(?:focus together|focus|study|work|let's focus|let's study together)$/i.test(s.trim()) &&
+    !monitoringRequest(s) && screenCommand(s) === null;
+  const task = input.trim().split(/(?:[.!;]\s*|\s+(?:and|then|please)\s+)(?=(?:please\s+)?(?:keep|get|bring|put|remind|nudge|tell|alert|monitor|follow|watch)\s)/i)[0];
+  if (task !== input.trim() && meaningful(task)) return clean(task);
+  if (!monitoringRequest(input) && screenCommand(input) === null && meaningful(input)) return clean(input);
+  return meaningful(previous) ? clean(previous) : "";
+}
+
 // Screen control is an explicit, local command boundary. The model cannot
 // select windows, activate capture, or authorize cloud transmission.
 export function screenCommand(input: string): "choose" | "preview" | "stop" | null {
   const text = input.trim().toLowerCase().replace(/[’‘]/g, "'").replace(/[.!?]+$/, "").trim().replace(/\s+/g, " ");
-  if (/^(?:watch my screen|read my screen|watch my window|choose a window|enable screen awareness|follow my work|follow my screen)$/.test(text)) return "choose";
+  if (/^(?:please\s+)?(?:watch my screen|read my screen|watch my window|choose a window|enable screen awareness|follow my work|follow my screen)(?:\s+please)?$/.test(text)) return "choose";
   if (/^(?:what can you read|read my window|analyze my window|analyse my window|show me what you read|what did you read|what am i working on|what am i doing|what do you see|what is on my screen|what\x27s on my screen|summarize my screen|summarise my screen|read the screen|what can you see on my screen)$/.test(text)) return "preview";
   if (/^(?:stop watching my screen|stop reading my screen|stop screen observation|disable screen awareness|stop watching my window)$/.test(text)) return "stop";
   return null;

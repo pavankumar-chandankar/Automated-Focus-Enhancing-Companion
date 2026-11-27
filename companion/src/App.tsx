@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from "react";
+import { AnalyticsWindow } from "./Analytics";
 import { getCurrentWindow, currentMonitor, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { companion, type Phase, type SessionSnapshot, type PreviousTurn, type Provider, type AwarenessStatus, type AwarenessCue, type ScreenStatus, type ScreenPreview } from "./native";
-import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQuestion, resolveConfirmation, rememberTurn, awarenessCommand, screenCommand, type Behaviour, type PendingAction } from "./dialogue";
+import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQuestion, resolveConfirmation, rememberTurn, awarenessCommand, screenCommand, monitoringRequest, monitoringGoalFromRequest, type Behaviour, type PendingAction } from "./dialogue";
 
 // Logical pixels. The visible native surface shrinks to the character when closed;
 // it is never a conventional full-window application.
 const COMPACT = new LogicalSize(192, 210);
-const OPEN = new LogicalSize(436, 550);
+const OPEN = new LogicalSize(342, 420);
 const appWindow = getCurrentWindow();
 // A click remains a click; moving the pointer at least 4px while pressed
 // begins dragging immediately, with no long-press timer.
@@ -105,6 +106,7 @@ function CompanionApp() {
     setMessageState(value);
   }
   const [reply, setReply] = useState("");
+  const replyArea = useRef<HTMLDivElement>(null);
   const [source, setSource] = useState<Provider | "fallback" | "command" | null>(null);
   const [provider, setProvider] = useState<Provider | null>(null);
   const history = useRef<PreviousTurn[]>([]);
@@ -115,6 +117,7 @@ function CompanionApp() {
   const [screen, setScreen] = useState<ScreenStatus | null>(null);
   const [screenPanel, setScreenPanel] = useState<"permission" | "preview" | null>(null);
   const [usedScreenContext, setUsedScreenContext] = useState(false);
+  const [monitorGoal, setMonitorGoal] = useState("");
   const [screenPreview, setScreenPreview] = useState<ScreenPreview | null>(null);
   const screenEpoch = useRef(0);
   const screenActive = useRef(false);
@@ -153,6 +156,8 @@ function CompanionApp() {
     return () => window.clearTimeout(timer);
   }, [screenPreview]);
 
+  useEffect(() => { if (replyArea.current) replyArea.current.scrollTop = 0; }, [reply, screenPanel, expanded]);
+
   function clearScreenPanel() {
     screenEpoch.current += 1;
     setScreenPanel(null);
@@ -164,7 +169,7 @@ function CompanionApp() {
     screenActive.current = false;
     setAmbientCue("");
     clearScreenPanel();
-    setScreen(old => old ? {...old, active: false, app: null, sample_ready: false, cloud_context: false} : null);
+    setScreen(old => old ? {...old, active: false, app: null, sample_ready: false, cloud_context: false, monitoring: false, relevance: "unknown"} : null);
   }
 
   useEffect(() => {
@@ -190,7 +195,7 @@ function CompanionApp() {
         if (disposed || !screenActive.current || hiding.current) return;
         setScreen(payload);
         if (!payload.active) { clearScreen(); return; }
-        if (payload.cue) showAmbient("Welcome back. Ready to continue?");
+        if (payload.cue) showAmbient("Still on your task? Ready to get back to it?");
       });
       if (disposed) { first(); return; } cleanups.push(first);
       const second = await appWindow.listen<string>("oplyra-screen-error", ({payload}) => {
@@ -218,14 +223,19 @@ function CompanionApp() {
   function startFollowing(cloud: boolean) {
     void screenOperation(async () => {
       const epoch = screenEpoch.current;
-      const status = await companion.startFollowScreen(cloud);
+      if (current?.phase === "idle") {
+        const data = await companion.start(monitorGoal.trim() || "Focus together", "Continue your chosen work");
+        setCurrent(data);
+      }
+      if (epoch !== screenEpoch.current || hiding.current || !expandedRef.current) return;
+      const status = await companion.startFollowScreen(cloud, monitorGoal.trim());
       if (epoch !== screenEpoch.current || hiding.current || !expandedRef.current) {
         await companion.stopScreen(); return;
       }
       clearScreenPanel();
       screenActive.current = status.active;
       setScreen(status);
-      setReply(cloud ? "I'll follow your work apps and use fresh screen text when we chat, within our screen budget. You can stop me anytime." : "I'll follow your work apps locally. Nothing from your screen is sent automatically.");
+      setReply(cloud ? "I’ll keep track of your goal and gently check in if a sustained change looks unrelated. Carry on; you don’t need to chat with me." : "I’ll observe supported apps locally. Semantic distraction assessment is off.");
       setSource("command");
     });
   }
@@ -359,7 +369,6 @@ function CompanionApp() {
   async function toggleDetails(open: boolean) {
     if (resizing) return;
     setResizing(true);
-    setError("");
     if (!open) {
       visibilityEpoch.current += 1;
       if (pendingAction.current || awarenessPending.current !== null || screenPanel || busy) {
@@ -545,14 +554,15 @@ function CompanionApp() {
   async function sendMessage() {
     if (actionRunning.current || hiding.current || !current || !message.trim()) return;
     const userMessage = message.trim();
-    const screenRequest = screenCommand(userMessage) ?? (screen?.active && /^what can you see[.!?]*$/i.test(userMessage) ? "preview" : null);
+    const requestedMonitoring = screenCommand(userMessage) !== "choose" && monitoringRequest(userMessage);
+    const screenRequest = requestedMonitoring ? "choose" : screenCommand(userMessage) ?? (screen?.active && /^what can you see[.!?]*$/i.test(userMessage) ? "preview" : null);
     if (screenRequest && !(screenRequest === "preview" && screen?.cloud_context)) {
       pendingAction.current = null;
       awarenessPending.current = null;
       clearScreenPanel();
       setMessage(""); setSource("command"); setLatency(null); setReaction("attentive"); setError("");
       if (screenRequest === "choose") {
-        if (current.phase !== "running") { setReply("Start a focus session first."); return; }
+        if (current.phase === "paused") { setReply("Resume your focus session first."); return; }
         if (screen?.supported === false) { setReply("Window observation requires macOS 14 or newer."); return; }
         // Stop old capture before asking for a new selection.
         void screenOperation(async () => {
@@ -561,8 +571,9 @@ function CompanionApp() {
           if (epoch !== screenEpoch.current || hiding.current || !expandedRef.current) return;
           screenActive.current = false;
           setAmbientCue("");
-          setScreen(old => old ? {...old, active:false, app:null, sample_ready:false} : null);
-          setReply("I can follow whichever supported work app is in front. Choose local reading, or let me share short OCR excerpts with Groq when you send a message. Stop before opening private pages.");
+          setScreen(old => old ? {...old, active:false, app:null, sample_ready:false, cloud_context:false, monitoring:false, relevance:"unknown"} : null);
+          setMonitorGoal(monitoringGoalFromRequest(userMessage, current.phase === "idle" ? "" : current.goal));
+          setReply("I can follow your work and gently check in if you drift. Confirm your goal below.");
           setScreenPanel("permission");
         });
         return;
@@ -701,11 +712,13 @@ function CompanionApp() {
           // Native provider errors contain no message content; keep diagnostics local.
           console.warn("AI request failed:", String(failure));
           if (expandedRef.current && visibility === visibilityEpoch.current) {
-            setReply(screenRequest === "preview" ? "I couldn’t use fresh screen context right now. Try again shortly or use local reading." : plan.reply);
+            setReply("I couldn’t get an AI response. Your message is still here; you can retry.");
+            setMessage(userMessage);
+            setError(String(failure).slice(0, 200));
             setReaction(plan.behaviour);
             setSource("fallback");
-            setAiNotice(String(failure).includes("Groq rate limit") ? "Groq limit reached · try later" : String(failure).includes("Groq API key missing") ? "Groq API key missing" : "AI unavailable · basic response");
-            history.current = rememberTurn(history.current, userMessage, plan.reply);
+            setAiNotice(String(failure).includes("Groq rate limit") ? "Groq limit reached · try later" : String(failure).includes("Groq API key missing") ? "Groq API key missing" : "AI request failed · retry");
+            // A failed request is not a completed conversation turn.
           }
         }
         return;
@@ -759,7 +772,7 @@ function CompanionApp() {
 
   const phase = current?.phase ?? "idle";
   const behaviour = checkIn && !expanded ? "attentive" : reaction ?? (expanded ? "attentive" : restingBehaviour(phase));
-  const phaseName = screen?.active && phase === "running" ? (screen.cloud_context ? "Screen · AI" : screen.sample_ready ? "Screen · read" : "Screen · local") : awareness?.enabled && phase === "running" ? (checkIn ? "Check-in · aware" : "Working · aware") : phase === "running" ? "Working together" : phase === "paused" ? "On a break" : "Here with you";
+  const phaseName = screen?.active && phase === "running" ? (screen.monitoring ? "Monitoring on" : screen.sample_ready ? "Screen · read" : "Screen · local") : awareness?.enabled && phase === "running" ? (checkIn ? "Check-in · aware" : "Working · aware") : phase === "running" ? "Working together" : phase === "paused" ? "On a break" : "Here with you";
 
   return (
     <main className={`overlay ${expanded ? "is-expanded" : "is-compact"} ${dragging ? "is-dragging" : ""}`}>
@@ -793,17 +806,19 @@ function CompanionApp() {
 
       {expanded && (
         <section id="companion-controls" className="conversation-bubble" aria-label="Talk to Oplyra">
-          <div className="conversation-heading"><strong>Oplyra</strong><button type="button" onClick={() => void toggleDetails(false)} aria-label="Fold conversation">−</button></div>
-          <div className="conversation-content">
+          <div className="conversation-heading"><strong>Oplyra</strong><div className="heading-actions"><button type="button" onClick={() => void companion.openAnalytics().catch(e => setError(String(e)))} aria-label="Open separate analytics window" title="Analytics">↗</button><button type="button" onClick={() => void toggleDetails(false)} aria-label="Fold conversation">−</button></div></div>
+          <div ref={replyArea} className="conversation-content">
           <p className="companion-reply" role="status" aria-live="polite">
             {reply || (phase === "running" ? "How's it going?" : phase === "paused" ? "Ready when you are." : "Let's spend some time together.")}
           </p>
           {screenPanel === "permission" && <div className="screen-controls">
-            <p className="screen-detail">Follow supported apps automatically, including visible browser tabs. Stop before viewing private material.</p>
-            <button type="button" disabled={busy || provider !== "groq"} onClick={() => startFollowing(true)}>Follow + AI context</button>
-            <button type="button" disabled={busy} onClick={() => startFollowing(false)}>Follow locally only</button>
+            <label htmlFor="monitor-goal">Current focus goal</label>
+            <textarea id="monitor-goal" rows={2} maxLength={160} value={monitorGoal} onPointerDown={() => { void companion.panelKeyboard(true).catch(() => {}); }} onChange={e => setMonitorGoal(e.target.value)} placeholder="e.g. Read my reliability engineering textbook" />
+            <p className="screen-detail">Start on the intended document. If you say “this document”, the first titled work window becomes the reference. Stop before opening private material.</p>
+            <button type="button" disabled={busy || provider !== "groq" || !monitorGoal.trim()} onClick={() => startFollowing(true)}>Monitor &amp; remind me (Groq)</button>
+            <button type="button" disabled={busy} onClick={() => startFollowing(false)}>Local observation only</button>
             <button type="button" className="secondary-screen" disabled={busy} onClick={clearScreenPanel}>Cancel</button>
-            <p className="screen-detail">AI context: up to 600 characters sent to Groq on chat turns only, at most 20 per UTC day (5 seconds apart). No background cloud calls.</p>
+            <p className="screen-detail">Monitoring sends short window-title and OCR excerpts (up to 600 characters) plus your goal to Groq automatically after sustained changes, and during screen-related chat. Shared limit 20/day; at least 8 reserved from background checks. No screenshots sent.</p>
           </div>}
           {screenPanel === "preview" && screenPreview && <div className="screen-controls">
             <p className="screen-detail">Goal: {screenPreview.goal || "(not set)"}</p>
@@ -813,6 +828,7 @@ function CompanionApp() {
             <button type="button" className="secondary-screen" disabled={busy} onClick={clearScreenPanel}>Don't share</button>
           </div>}
           {error && <p className="error-message" role="alert">{error}</p>}
+          {screen?.active && <div className="screen-diagnostics"><p className="screen-detail">{screen.detail || "Waiting for work app"}</p>{screen.analysis_detail && <p className="screen-detail">{screen.analysis_detail}</p>}{screen.cloud_context && usedScreenContext && <p className="screen-detail">Last reply used fresh screen text.</p>}</div>}
           </div>
           <form className="conversation-form" onSubmit={(event) => { event.preventDefault(); void sendMessage(); }}>
             <input aria-label="Type to Oplyra" value={message} maxLength={300}
@@ -823,9 +839,8 @@ function CompanionApp() {
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
             </button>
           </form>
-          <p className="conversation-note">{awarenessPending.current !== null ? "Reply yes or no · awareness is off" : pendingAction.current ? "Reply yes or no · no change yet" : source === "local" || source === "deepseek" || source === "groq" ? `${source === "groq" ? "GPT-OSS-120B · Groq" : source === "deepseek" ? "DeepSeek · online" : activeModel ?? "Local AI"} · ${((latency ?? 0) / 1000).toFixed(1)} s` : source === "fallback" ? aiNotice || "AI unavailable · basic response" : provider === "groq" ? "Groq online · chat and session context sent" : provider === "deepseek" ? "DeepSeek online · chat and session context sent" : provider === "local" ? "On-device · Talk to Oplyra." : "AI provider loading…"} </p>
-          {screen?.active && <div className="screen-footer"><span>{screen.cloud_context ? "AI context permitted" : "Local OCR only"} · {screen.detail || "Waiting for work app"}</span><button type="button" onClick={() => { void companion.stopScreen().then(() => { clearScreen(); setUsedScreenContext(false); setReply("Screen observation is off."); }).catch(failure => setError(String(failure))); }}>Stop</button></div>}
-          {screen?.cloud_context && <p className="screen-detail">{usedScreenContext ? "Last reply used fresh screen text." : "No screen text used in last reply (or budget/capture unavailable)."}</p>}
+          <p className="conversation-note">{awarenessPending.current !== null ? "Reply yes or no · awareness is off" : pendingAction.current ? "Reply yes or no · no change yet" : source === "local" || source === "deepseek" || source === "groq" ? `${source === "groq" ? "GPT-OSS-120B · Groq" : source === "deepseek" ? "DeepSeek · online" : activeModel ?? "Local AI"} · ${((latency ?? 0) / 1000).toFixed(1)} s` : source === "fallback" ? aiNotice || "AI request failed · retry" : provider === "groq" ? "Groq · ready" : provider === "deepseek" ? "DeepSeek online · chat and session context sent" : provider === "local" ? "On-device · Talk to Oplyra." : "AI provider loading…"} </p>
+          {screen?.active && <div className="screen-footer"><span>{screen.monitoring ? "Monitoring on" : "Local observation only"}</span><button type="button" onClick={() => { void companion.stopScreen().then(() => { clearScreen(); setUsedScreenContext(false); setReply("Screen observation is off."); }).catch(failure => setError(String(failure))); }}>Stop</button></div>}
           </section>
       )}
       {!expanded && error && <div className="compact-error" role="alert" title={error}>!</div>}
@@ -834,5 +849,5 @@ function CompanionApp() {
 }
 
 export default function App() {
-  return window.location.hash === "#drop-zone" ? <DropTarget /> : <CompanionApp />;
+  return window.location.hash === "#analytics" ? <AnalyticsWindow /> : window.location.hash === "#drop-zone" ? <DropTarget /> : <CompanionApp />;
 }

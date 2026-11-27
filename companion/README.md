@@ -61,3 +61,7 @@ See [AMBIENT_OVERLAY_V0111.md](AMBIENT_OVERLAY_V0111.md). Experimental non-activ
 ## v0.11.2 automatic foreground following
 
 See [FOLLOW_CONTEXT_V0112.md](FOLLOW_CONTEXT_V0112.md). One session opt-in, no window chooser, optional Groq chat-time screen context, larger bounded native panel. No background cloud observation.
+
+## v0.12 proactive monitoring preview
+
+See [PROACTIVE_MONITOR_V012.md](PROACTIVE_MONITOR_V012.md). Small floating companion, separate maximizable analytics window, explicitly authorized automatic goal-relative checks, improved OCR and bounded passive reminders.
