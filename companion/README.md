@@ -49,3 +49,7 @@ See [CONTEXTUAL_INTELLIGENCE_V09.md](CONTEXTUAL_INTELLIGENCE_V09.md). The defaul
 ## v0.10 contextual awareness
 
 See [CONTEXTUAL_AWARENESS_V010.md](CONTEXTUAL_AWARENESS_V010.md). macOS-only session-scoped, opt-in foreground-app category and inactivity sampling; conservative local check-ins, no observation data sent to AI. Voice remains deferred.
+
+## v0.11 semantic screen awareness preview
+
+See [SCREEN_AWARENESS_V011.md](SCREEN_AWARENESS_V011.md). User-selected foreground-window capture on macOS 14+, local Apple Vision OCR, reviewed one-shot Groq relevance analysis, and a persistent 20-attempt UTC-day budget. No autonomous cloud analysis or screen/audio recording. Voice deferred.

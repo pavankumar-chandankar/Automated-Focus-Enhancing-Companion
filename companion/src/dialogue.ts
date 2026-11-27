@@ -17,6 +17,16 @@ export function awarenessCommand(input: string): "enable" | "disable" | "status"
   return null;
 }
 
+// Screen control is an explicit, local command boundary. The model cannot
+// select windows, activate capture, or authorize cloud transmission.
+export function screenCommand(input: string): "choose" | "preview" | "stop" | null {
+  const text = input.trim().toLowerCase().replace(/[’‘]/g, "'").replace(/[.!?]+$/, "").trim().replace(/\s+/g, " ");
+  if (/^(?:watch my screen|read my screen|watch my window|choose a window|enable screen awareness)$/.test(text)) return "choose";
+  if (/^(?:what can you read|read my window|analyze my window|analyse my window|show me what you read|what did you read)$/.test(text)) return "preview";
+  if (/^(?:stop watching my screen|stop reading my screen|stop screen observation|disable screen awareness|stop watching my window)$/.test(text)) return "stop";
+  return null;
+}
+
 export type Behaviour = "available" | "working" | "resting" | "attentive" | "encouraging" | "celebrating";
 export type Intent = "start" | "pause" | "resume" | "finish" | "quiet" | "hide";
 export type Action = "none" | Intent;

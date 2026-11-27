@@ -104,6 +104,7 @@ impl Policy {
 pub struct AwarenessState(Mutex<Policy>);
 
 pub fn stop(app: &AppHandle) {
+    crate::screen::stop(app);
     if let Some(state) = app.try_state::<AwarenessState>() {
         if let Ok(mut policy) = state.0.lock() { *policy = Policy::default(); }
     }

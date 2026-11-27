@@ -115,3 +115,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 @keyframes nod { 0%,100% { transform: rotate(0deg); } 45% { transform: rotate(4deg); } }
 @keyframes cheer { 0%,100% { transform: translateY(0); } 45% { transform: translateY(-7px); } }
 @media (prefers-reduced-motion: reduce) { .creature-float, .eyes, .celebrate-spark { animation: none !important; } }
+
+/* Explicit window consent and readback, inside the existing scrollable bubble. */
+.screen-controls { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 8px; }
+.screen-controls select { width: 100%; max-width: 100%; font: inherit; font-size: 11px; padding: 5px; border: 1px solid #d5caed; border-radius: 8px; background: white; color: #39334e; }
+.screen-controls button { border: 0; border-radius: 8px; padding: 6px 9px; font-size: 11px; color: white; background: #7763c5; cursor: pointer; }
+.screen-controls button:disabled { opacity: .5; cursor: default; }
+.screen-controls .secondary-screen { background: #e8e1f6; color: #514765; }
+.screen-detail { width: 100%; margin: 3px 0; font-size: 10px; line-height: 1.4; color: #675a82; overflow-wrap: anywhere; }
+.screen-excerpt { width: 100%; max-height: 90px; overflow: auto; margin: 0; padding: 6px; background: #f0ebfb; border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.35 ui-monospace, monospace; }

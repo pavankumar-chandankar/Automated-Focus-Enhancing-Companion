@@ -3,6 +3,7 @@ mod policy;
 mod intelligence;
 mod overlay;
 mod awareness;
+mod screen;
 use policy::{Feedback, SupportMode};
 
 use std::{fs, path::PathBuf, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
@@ -190,14 +191,16 @@ pub fn run() {
             }
             app.manage(overlay::OverlayState::default());
             app.manage(awareness::AwarenessState::default());
+            app.manage(screen::ScreenState::new(app.path().app_local_data_dir()?.join("screen-budget.json")));
             let path = app.path().app_local_data_dir()?.join("session.json");
             let store = SessionStore::read(path).map_err(std::io::Error::other)?;
             app.manage(store);
             let show = MenuItem::with_id(app, "show", "Show Oplyra", true, None::<&str>)?;
             let hide = MenuItem::with_id(app, "hide", "Hide Oplyra", true, None::<&str>)?;
             let stop_awareness = MenuItem::with_id(app, "stop-awareness", "Stop activity awareness", true, None::<&str>)?;
+            let stop_screen = MenuItem::with_id(app, "stop-screen", "Stop screen observation", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &hide, &stop_awareness, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &hide, &stop_awareness, &stop_screen, &quit])?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("app icon").clone())
                 .tooltip("Oplyra")
@@ -207,6 +210,7 @@ pub fn run() {
                     "show" => overlay::request_show(app.clone()),
                     "hide" => overlay::request_hide(app),
                     "stop-awareness" => awareness::stop(app),
+                    "stop-screen" => screen::stop(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -227,7 +231,10 @@ pub fn run() {
             record_cue_feedback, reset_cue_preference, local_companion_reply, intelligence_provider, begin_companion_drag,
             finish_companion_drag, cancel_companion_drag,
             overlay::load_overlay_draft, overlay::hide_companion,
-            awareness::set_awareness, awareness::awareness_status, awareness::sample_awareness, awareness::suspend_awareness
+            awareness::set_awareness, awareness::awareness_status, awareness::sample_awareness, awareness::suspend_awareness,
+            screen::screen_status, screen::request_screen_permission, screen::list_screen_windows,
+            screen::select_screen_window, screen::sample_screen, screen::stop_screen,
+            screen::preview_screen, screen::analyze_screen
         ])
         .build(tauri::generate_context!())
         .expect("error while building Oplyra desktop")
