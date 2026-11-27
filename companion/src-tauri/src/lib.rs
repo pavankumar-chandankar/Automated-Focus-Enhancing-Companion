@@ -3,6 +3,7 @@ mod policy;
 mod intelligence;
 mod overlay;
 mod awareness;
+mod screen;
 use policy::{Feedback, SupportMode};
 
 use std::{fs, path::PathBuf, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
@@ -125,9 +126,16 @@ fn intelligence_provider() -> Result<intelligence::Provider, String> { intellige
 
 // Model output is a reply or a bounded proposal, never a native action.
 #[tauri::command]
-async fn local_companion_reply(store: State<'_, SessionStore>, message: String, history: Vec<intelligence::PreviousTurn>) -> Result<intelligence::ModelReply, String> {
+async fn local_companion_reply(app: tauri::AppHandle, store: State<'_, SessionStore>, screen: State<'_, screen::ScreenState>, message: String, history: Vec<intelligence::PreviousTurn>) -> Result<intelligence::ModelReply, String> {
+    let excerpt = screen::chat_context(&app).await;
     let snapshot = store.snapshot()?;
-    tauri::async_runtime::spawn_blocking(move || intelligence::generate(&message, &snapshot, &history))
+    let screen_active = screen::observation_active(&screen);
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app.state::<screen::ScreenState>();
+        let text = excerpt.as_ref().filter(|context| screen::cloud_context_active(&state, context) && snapshot.phase == model::Phase::Running).map(|context| context.text.as_str());
+        intelligence::generate(&message, &snapshot, &history, screen_active, text)
+    })
         .await.map_err(|_| "Local intelligence worker failed".to_owned())?
 }
 
@@ -178,7 +186,10 @@ fn finish_companion_drag(app: tauri::AppHandle) -> Result<bool, String> {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+    builder
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             // A second launch must not resurrect a companion hidden in the tray.
             let _ = app;
@@ -190,14 +201,19 @@ pub fn run() {
             }
             app.manage(overlay::OverlayState::default());
             app.manage(awareness::AwarenessState::default());
+            app.manage(screen::ScreenState::new(app.path().app_local_data_dir()?.join("screen-budget.json")));
             let path = app.path().app_local_data_dir()?.join("session.json");
             let store = SessionStore::read(path).map_err(std::io::Error::other)?;
             app.manage(store);
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") { overlay::configure_panel(&window).map_err(std::io::Error::other)?; }
+            screen::start_worker(app.handle().clone());
             let show = MenuItem::with_id(app, "show", "Show Oplyra", true, None::<&str>)?;
             let hide = MenuItem::with_id(app, "hide", "Hide Oplyra", true, None::<&str>)?;
             let stop_awareness = MenuItem::with_id(app, "stop-awareness", "Stop activity awareness", true, None::<&str>)?;
+            let stop_screen = MenuItem::with_id(app, "stop-screen", "Stop screen observation", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &hide, &stop_awareness, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &hide, &stop_awareness, &stop_screen, &quit])?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("app icon").clone())
                 .tooltip("Oplyra")
@@ -207,6 +223,7 @@ pub fn run() {
                     "show" => overlay::request_show(app.clone()),
                     "hide" => overlay::request_hide(app),
                     "stop-awareness" => awareness::stop(app),
+                    "stop-screen" => screen::stop(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -226,8 +243,11 @@ pub fn run() {
             save_next_step, set_quiet_mode, resume_with_assistance, set_support_mode,
             record_cue_feedback, reset_cue_preference, local_companion_reply, intelligence_provider, begin_companion_drag,
             finish_companion_drag, cancel_companion_drag,
-            overlay::load_overlay_draft, overlay::hide_companion,
-            awareness::set_awareness, awareness::awareness_status, awareness::sample_awareness, awareness::suspend_awareness
+            overlay::load_overlay_draft, overlay::hide_companion, overlay::panel_keyboard,
+            awareness::set_awareness, awareness::awareness_status, awareness::sample_awareness, awareness::suspend_awareness,
+            screen::screen_status, screen::request_screen_permission, screen::start_follow_screen, screen::list_screen_windows,
+            screen::select_screen_window, screen::sample_screen, screen::stop_screen,
+            screen::preview_screen, screen::analyze_screen
         ])
         .build(tauri::generate_context!())
         .expect("error while building Oplyra desktop")

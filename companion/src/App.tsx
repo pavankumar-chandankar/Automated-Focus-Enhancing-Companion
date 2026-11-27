@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { getCurrentWindow, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
+import { getCurrentWindow, currentMonitor, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { companion, type Phase, type SessionSnapshot, type PreviousTurn, type Provider, type AwarenessStatus, type AwarenessCue } from "./native";
-import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQuestion, resolveConfirmation, rememberTurn, awarenessCommand, type Behaviour, type PendingAction } from "./dialogue";
+import { companion, type Phase, type SessionSnapshot, type PreviousTurn, type Provider, type AwarenessStatus, type AwarenessCue, type ScreenStatus, type ScreenPreview } from "./native";
+import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQuestion, resolveConfirmation, rememberTurn, awarenessCommand, screenCommand, type Behaviour, type PendingAction } from "./dialogue";
 
 // Logical pixels. The visible native surface shrinks to the character when closed;
 // it is never a conventional full-window application.
 const COMPACT = new LogicalSize(192, 210);
-const OPEN = new LogicalSize(342, 400);
+const OPEN = new LogicalSize(436, 550);
 const appWindow = getCurrentWindow();
 // A click remains a click; moving the pointer at least 4px while pressed
 // begins dragging immediately, with no long-press timer.
@@ -112,6 +112,14 @@ function CompanionApp() {
   const [latency, setLatency] = useState<number | null>(null);
   const [activeModel, setActiveModel] = useState<string | null>(null);
   const [awareness, setAwareness] = useState<AwarenessStatus | null>(null);
+  const [screen, setScreen] = useState<ScreenStatus | null>(null);
+  const [screenPanel, setScreenPanel] = useState<"permission" | "preview" | null>(null);
+  const [usedScreenContext, setUsedScreenContext] = useState(false);
+  const [screenPreview, setScreenPreview] = useState<ScreenPreview | null>(null);
+  const screenEpoch = useRef(0);
+  const screenActive = useRef(false);
+  const [ambientCue, setAmbientCue] = useState("");
+  const ambientTimer = useRef<number | null>(null);
   const [checkIn, setCheckIn] = useState<AwarenessCue | null>(null);
   const checkInExpiry = useRef(0);
   const awarenessPending = useRef<number | null>(null);
@@ -126,6 +134,7 @@ function CompanionApp() {
   useEffect(() => {
     let active = true;
     // Draft hydration happens after registering the native hide listener below.
+    void companion.screenStatus().then(value => { if (active && screenEpoch.current === 0) setScreen(value); }).catch(() => {});
     void companion.awarenessStatus().then(value => { if (active && awarenessEpoch.current === 0) setAwareness(value); }).catch(() => {});
     void companion.provider().then(value => { if (active) setProvider(value); }).catch(failure => { if (active) setError(String(failure)); });
     void companion.snapshot().then((data) => {
@@ -134,9 +143,121 @@ function CompanionApp() {
     return () => { active = false; };
   }, []);
 
+  useEffect(() => {
+    if (!screenPreview) return;
+    const timer = window.setTimeout(() => {
+      setScreenPreview(null);
+      setScreenPanel(null);
+      setReply("That window excerpt expired. Ask what I can read again after using the window.");
+    }, Math.max(0, screenPreview.valid_for_ms));
+    return () => window.clearTimeout(timer);
+  }, [screenPreview]);
+
+  function clearScreenPanel() {
+    screenEpoch.current += 1;
+    setScreenPanel(null);
+    setScreenPreview(null);
+  }
+
+  function clearScreen() {
+    setUsedScreenContext(false);
+    screenActive.current = false;
+    setAmbientCue("");
+    clearScreenPanel();
+    setScreen(old => old ? {...old, active: false, app: null, sample_ready: false, cloud_context: false} : null);
+  }
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void appWindow.listen("oplyra-screen-stopped", () => { if (!disposed) clearScreen(); })
+      .then(unlisten => { if (disposed) unlisten(); else cleanup = unlisten; }).catch(() => {});
+    return () => { disposed = true; cleanup?.(); };
+  }, []);
+
+  function showAmbient(text: string) {
+    if (expandedRef.current || held.current || hiding.current || actionRunning.current) return;
+    if (ambientTimer.current !== null) window.clearTimeout(ambientTimer.current);
+    setAmbientCue(text);
+    ambientTimer.current = window.setTimeout(() => { setAmbientCue(""); ambientTimer.current = null; }, 12000);
+  }
+
+  useEffect(() => {
+    let disposed = false;
+    const cleanups: (() => void)[] = [];
+    const subscribe = async () => {
+      const first = await appWindow.listen<ScreenStatus>("oplyra-screen-status", ({payload}) => {
+        if (disposed || !screenActive.current || hiding.current) return;
+        setScreen(payload);
+        if (!payload.active) { clearScreen(); return; }
+        if (payload.cue) showAmbient("Welcome back. Ready to continue?");
+      });
+      if (disposed) { first(); return; } cleanups.push(first);
+      const second = await appWindow.listen<string>("oplyra-screen-error", ({payload}) => {
+        if (disposed || !screenActive.current) return;
+        clearScreen();
+        setError("Screen observation stopped: " + payload);
+      });
+      if (disposed) second(); else cleanups.push(second);
+    };
+    void subscribe().catch(() => {});
+    return () => { disposed = true; cleanups.forEach(fn => fn()); if (ambientTimer.current !== null) window.clearTimeout(ambientTimer.current); };
+  }, []);
+
+  // Native UI confirmation buttons, not model-generated instructions.
+  async function screenOperation(operation: () => Promise<void>) {
+    if (actionRunning.current || hiding.current || !expandedRef.current) return;
+    actionRunning.current = true;
+    setBusy(true);
+    setError("");
+    try { await operation(); }
+    catch (failure) { if (expandedRef.current && !hiding.current) setError(String(failure)); }
+    finally { actionRunning.current = false; setBusy(false); }
+  }
+
+  function startFollowing(cloud: boolean) {
+    void screenOperation(async () => {
+      const epoch = screenEpoch.current;
+      const status = await companion.startFollowScreen(cloud);
+      if (epoch !== screenEpoch.current || hiding.current || !expandedRef.current) {
+        await companion.stopScreen(); return;
+      }
+      clearScreenPanel();
+      screenActive.current = status.active;
+      setScreen(status);
+      setReply(cloud ? "I'll follow your work apps and use fresh screen text when we chat, within our screen budget. You can stop me anytime." : "I'll follow your work apps locally. Nothing from your screen is sent automatically.");
+      setSource("command");
+    });
+  }
+
+  function sharePreview() {
+    void screenOperation(async () => {
+      if (!screenPreview || provider !== "groq") return;
+      const epoch = screenEpoch.current;
+      const id = screenPreview.id;
+      setScreenPreview(null);
+      setScreenPanel(null);
+      setReply("Checking how the reviewed text relates to your goal…");
+      try {
+        const answer = await companion.analyzeScreen(id);
+        if (epoch === screenEpoch.current && expandedRef.current && !hiding.current) {
+          setReply(answer);
+          setSource("command");
+          setLatency(null);
+        }
+      } catch (failure) {
+        if (epoch === screenEpoch.current && expandedRef.current && !hiding.current) {
+          setReply("I couldn't analyze that excerpt. No automatic retry.");
+          setError(String(failure));
+        }
+      }
+    });
+  }
+
   function clearConversation() {
     pendingAction.current = null;
     awarenessPending.current = null;
+    clearScreenPanel();
     // Folding the bubble does not erase conversational context.
     setReply("");
     setReaction(null);
@@ -174,7 +295,7 @@ function CompanionApp() {
         if (disposed || epoch !== awarenessEpoch.current || expandedRef.current || hiding.current) return;
         setAwareness(result);
         if (!result.enabled) setCheckIn(null);
-        else if (result.cue) { checkInExpiry.current = performance.now() + 60_000; setCheckIn(result.cue); }
+        else if (result.cue) { checkInExpiry.current = performance.now() + 60_000; setCheckIn(result.cue); showAmbient(result.cue === "leisure_check" ? "Still on task, or taking a break?" : "Welcome back. Ready to continue?"); }
         else if (performance.now() >= checkInExpiry.current) setCheckIn(null);
       } catch {
         if (!disposed && epoch === awarenessEpoch.current) {
@@ -191,6 +312,8 @@ function CompanionApp() {
   async function hideOverlay() {
     if (hiding.current) return;
     hiding.current = true;
+    clearScreen();
+    void companion.stopScreen().catch(() => {});
     clearAwareness();
     void companion.setAwareness(false).catch(() => {});
     visibilityEpoch.current += 1;
@@ -237,19 +360,40 @@ function CompanionApp() {
     if (resizing) return;
     setResizing(true);
     setError("");
-    if (!open) { visibilityEpoch.current += 1; pendingAction.current = null; awarenessPending.current = null; }
+    if (!open) {
+      visibilityEpoch.current += 1;
+      if (pendingAction.current || awarenessPending.current !== null || screenPanel || busy) {
+        setReply("Ready when you are."); setSource(null);
+      }
+      pendingAction.current = null; awarenessPending.current = null; clearScreenPanel();
+      void companion.panelKeyboard(false).catch(() => {});
+    }
+    else { screenEpoch.current += 1; }
     if (open && awareness?.enabled) {
       awarenessEpoch.current += 1;
       void companion.suspendAwareness().catch(() => {});
     }
     try {
       // The hit-test region grows only when the user explicitly opens controls.
-      await appWindow.setSize(open ? OPEN : COMPACT);
+      if (open) {
+        const monitor = await currentMonitor();
+        if (monitor) {
+          const area = monitor.workArea;
+          const scale = monitor.scaleFactor;
+          const size = new LogicalSize(Math.min(OPEN.width, Math.floor(area.size.width / scale)), Math.min(OPEN.height, Math.floor(area.size.height / scale)));
+          const pos = await appWindow.outerPosition();
+          const x = Math.max(area.position.x, Math.min(pos.x, area.position.x + area.size.width - Math.ceil(size.width * scale)));
+          const y = Math.max(area.position.y, Math.min(pos.y, area.position.y + area.size.height - Math.ceil(size.height * scale)));
+          await appWindow.setSize(size);
+          await appWindow.setPosition(new PhysicalPosition(Math.round(x), Math.round(y)));
+        } else await appWindow.setSize(OPEN);
+      } else await appWindow.setSize(COMPACT);
       expandedRef.current = open;
       visibilityEpoch.current += 1;
       setExpanded(open);
-      if (!open) clearConversation();
-      else if (checkIn && performance.now() < checkInExpiry.current) {
+      // Folding is presentation only; keep the latest ordinary reply and chat history.
+      if (open) setAmbientCue("");
+      if (open && checkIn && performance.now() < checkInExpiry.current) {
         setReply(checkIn === "leisure_check" ? "Still on task, or taking a break?" : "Welcome back. Ready to pick up where you left off?");
         setReaction("attentive");
         setSource("command");
@@ -292,8 +436,10 @@ function CompanionApp() {
       // Keep the open bubble and its text in place relative to the character.
       // Moving is not a request to erase a draft or close a conversation.
       awarenessPending.current = null;
+      clearScreenPanel();
       awarenessEpoch.current += 1;
       setCheckIn(null);
+      setAmbientCue("");
       if (awareness?.enabled) void companion.suspendAwareness().catch(() => {});
       if (pendingAction.current) {
         pendingAction.current = null;
@@ -399,6 +545,43 @@ function CompanionApp() {
   async function sendMessage() {
     if (actionRunning.current || hiding.current || !current || !message.trim()) return;
     const userMessage = message.trim();
+    const screenRequest = screenCommand(userMessage) ?? (screen?.active && /^what can you see[.!?]*$/i.test(userMessage) ? "preview" : null);
+    if (screenRequest && !(screenRequest === "preview" && screen?.cloud_context)) {
+      pendingAction.current = null;
+      awarenessPending.current = null;
+      clearScreenPanel();
+      setMessage(""); setSource("command"); setLatency(null); setReaction("attentive"); setError("");
+      if (screenRequest === "choose") {
+        if (current.phase !== "running") { setReply("Start a focus session first."); return; }
+        if (screen?.supported === false) { setReply("Window observation requires macOS 14 or newer."); return; }
+        // Stop old capture before asking for a new selection.
+        void screenOperation(async () => {
+          const epoch = screenEpoch.current;
+          await companion.stopScreen();
+          if (epoch !== screenEpoch.current || hiding.current || !expandedRef.current) return;
+          screenActive.current = false;
+          setAmbientCue("");
+          setScreen(old => old ? {...old, active:false, app:null, sample_ready:false} : null);
+          setReply("I can follow whichever supported work app is in front. Choose local reading, or let me share short OCR excerpts with Groq when you send a message. Stop before opening private pages.");
+          setScreenPanel("permission");
+        });
+        return;
+      }
+      if (screenRequest === "stop") {
+        void screenOperation(async () => { await companion.stopScreen(); clearScreen(); setReply("Screen observation is off."); });
+        return;
+      }
+      void screenOperation(async () => {
+        const epoch = screenEpoch.current;
+        const preview = await companion.previewScreen();
+        if (epoch !== screenEpoch.current || hiding.current || !expandedRef.current) return;
+        setScreenPreview(preview);
+        setScreenPanel("preview");
+        setReply("Here's the latest locally recognised excerpt. Review it and your goal before sharing.");
+      });
+      return;
+    }
+    clearScreenPanel();
     const awarenessRequest = awarenessCommand(userMessage);
     const consent = awarenessPending.current;
     awarenessPending.current = null;
@@ -428,6 +611,7 @@ function CompanionApp() {
       const epoch = ++awarenessEpoch.current;
       const visibility = visibilityEpoch.current;
       try {
+        if (!enable) { await companion.stopScreen(); clearScreen(); }
         const result = await companion.setAwareness(enable);
         if (epoch === awarenessEpoch.current && !hiding.current) {
           setAwareness(result); setCheckIn(null);
@@ -476,9 +660,10 @@ function CompanionApp() {
     setMessage("");
     setSource(null);
     setLatency(null);
+    setUsedScreenContext(false);
     try {
       let data = current;
-      if (plan.action === "none" && plan.useModel) {
+      if (plan.action === "none" && (plan.useModel || (screenRequest === "preview" && screen?.cloud_context))) {
         setReply("Thinking…");
         setReaction("attentive");
         try {
@@ -487,6 +672,7 @@ function CompanionApp() {
             setAiNotice("");
             setSource(generated.provider);
             setActiveModel(generated.model);
+            setUsedScreenContext(generated.screen_context_used);
             setLatency(generated.latency_ms);
             if (generated.proposal) {
               // No model-generated instruction is executed. A proposal is a
@@ -507,14 +693,15 @@ function CompanionApp() {
             } else {
               setReply(generated.reply);
               setReaction(plan.behaviour === "encouraging" ? "encouraging" : generated.reaction);
-              history.current = rememberTurn(history.current, userMessage, generated.reply);
+              // Do not retain potentially screen-derived content in chat history.
+              if (!generated.screen_context_used) history.current = rememberTurn(history.current, userMessage, generated.reply);
             }
           }
         } catch (failure) {
           // Native provider errors contain no message content; keep diagnostics local.
           console.warn("AI request failed:", String(failure));
           if (expandedRef.current && visibility === visibilityEpoch.current) {
-            setReply(plan.reply);
+            setReply(screenRequest === "preview" ? "I couldn’t use fresh screen context right now. Try again shortly or use local reading." : plan.reply);
             setReaction(plan.behaviour);
             setSource("fallback");
             setAiNotice(String(failure).includes("Groq rate limit") ? "Groq limit reached · try later" : String(failure).includes("Groq API key missing") ? "Groq API key missing" : "AI unavailable · basic response");
@@ -528,12 +715,12 @@ function CompanionApp() {
       }
       switch (plan.action) {
         case "start": data = await companion.start(plan.goal ?? "Focus together", "Continue the chosen task"); break;
-        case "pause": data = await companion.pause(); clearAwareness(); break;
+        case "pause": data = await companion.pause(); clearAwareness(); clearScreen(); break;
         // The older automatic return-cue policy remains in Rust but isn't
         // invoked here. Conversation is requested by the user, not a prompt.
         case "resume": data = await companion.resume(); break;
-        case "finish": data = await companion.finish(); clearAwareness(); break;
-        case "quiet": data = await companion.setSupportMode("quiet"); clearAwareness(); break;
+        case "finish": data = await companion.finish(); clearAwareness(); clearScreen(); break;
+        case "quiet": data = await companion.setSupportMode("quiet"); clearAwareness(); clearScreen(); break;
         case "hide":
           // Hiding never finishes or deletes a session. Menu bar recreates it.
           await hideOverlay();
@@ -572,7 +759,7 @@ function CompanionApp() {
 
   const phase = current?.phase ?? "idle";
   const behaviour = checkIn && !expanded ? "attentive" : reaction ?? (expanded ? "attentive" : restingBehaviour(phase));
-  const phaseName = awareness?.enabled && phase === "running" ? (checkIn ? "Check-in · aware" : "Working · aware") : phase === "running" ? "Working together" : phase === "paused" ? "On a break" : "Here with you";
+  const phaseName = screen?.active && phase === "running" ? (screen.cloud_context ? "Screen · AI" : screen.sample_ready ? "Screen · read" : "Screen · local") : awareness?.enabled && phase === "running" ? (checkIn ? "Check-in · aware" : "Working · aware") : phase === "running" ? "Working together" : phase === "paused" ? "On a break" : "Here with you";
 
   return (
     <main className={`overlay ${expanded ? "is-expanded" : "is-compact"} ${dragging ? "is-dragging" : ""}`}>
@@ -601,24 +788,45 @@ function CompanionApp() {
           <span className={`status-light status-${phase}`} />
           <span>{phaseName}</span>
         </div>
+        {!expanded && !dragging && ambientCue && <div className="ambient-cue" role="status">{ambientCue}</div>}
       </div>
 
       {expanded && (
         <section id="companion-controls" className="conversation-bubble" aria-label="Talk to Oplyra">
+          <div className="conversation-heading"><strong>Oplyra</strong><button type="button" onClick={() => void toggleDetails(false)} aria-label="Fold conversation">−</button></div>
+          <div className="conversation-content">
           <p className="companion-reply" role="status" aria-live="polite">
             {reply || (phase === "running" ? "How's it going?" : phase === "paused" ? "Ready when you are." : "Let's spend some time together.")}
           </p>
+          {screenPanel === "permission" && <div className="screen-controls">
+            <p className="screen-detail">Follow supported apps automatically, including visible browser tabs. Stop before viewing private material.</p>
+            <button type="button" disabled={busy || provider !== "groq"} onClick={() => startFollowing(true)}>Follow + AI context</button>
+            <button type="button" disabled={busy} onClick={() => startFollowing(false)}>Follow locally only</button>
+            <button type="button" className="secondary-screen" disabled={busy} onClick={clearScreenPanel}>Cancel</button>
+            <p className="screen-detail">AI context: up to 600 characters sent to Groq on chat turns only, at most 20 per UTC day (5 seconds apart). No background cloud calls.</p>
+          </div>}
+          {screenPanel === "preview" && screenPreview && <div className="screen-controls">
+            <p className="screen-detail">Goal: {screenPreview.goal || "(not set)"}</p>
+            <pre className="screen-excerpt">{screenPreview.excerpt}</pre>
+            <p className="screen-detail">Share only this goal and excerpt with Groq. {screenPreview.remaining_today} analyses left today. Preview expires in at most 60 seconds.</p>
+            <button type="button" disabled={busy || provider !== "groq" || screenPreview.remaining_today === 0} onClick={sharePreview}>Analyze with Groq once</button>
+            <button type="button" className="secondary-screen" disabled={busy} onClick={clearScreenPanel}>Don't share</button>
+          </div>}
+          {error && <p className="error-message" role="alert">{error}</p>}
+          </div>
           <form className="conversation-form" onSubmit={(event) => { event.preventDefault(); void sendMessage(); }}>
             <input aria-label="Type to Oplyra" value={message} maxLength={300}
               placeholder={pendingAction.current || awarenessPending.current !== null ? "Yes or no…" : "Say something…"} disabled={!ready || !current || busy}
+              onPointerDown={() => { void companion.panelKeyboard(true).catch(() => {}); }}
               onChange={(event) => setMessage(event.target.value)} />
             <button type="submit" aria-label="Send message" disabled={busy || !ready || !current || !message.trim()}>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
             </button>
           </form>
           <p className="conversation-note">{awarenessPending.current !== null ? "Reply yes or no · awareness is off" : pendingAction.current ? "Reply yes or no · no change yet" : source === "local" || source === "deepseek" || source === "groq" ? `${source === "groq" ? "GPT-OSS-120B · Groq" : source === "deepseek" ? "DeepSeek · online" : activeModel ?? "Local AI"} · ${((latency ?? 0) / 1000).toFixed(1)} s` : source === "fallback" ? aiNotice || "AI unavailable · basic response" : provider === "groq" ? "Groq online · chat and session context sent" : provider === "deepseek" ? "DeepSeek online · chat and session context sent" : provider === "local" ? "On-device · Talk to Oplyra." : "AI provider loading…"} </p>
-          {error && <p className="error-message" role="alert">{error}</p>}
-        </section>
+          {screen?.active && <div className="screen-footer"><span>{screen.cloud_context ? "AI context permitted" : "Local OCR only"} · {screen.detail || "Waiting for work app"}</span><button type="button" onClick={() => { void companion.stopScreen().then(() => { clearScreen(); setUsedScreenContext(false); setReply("Screen observation is off."); }).catch(failure => setError(String(failure))); }}>Stop</button></div>}
+          {screen?.cloud_context && <p className="screen-detail">{usedScreenContext ? "Last reply used fresh screen text." : "No screen text used in last reply (or budget/capture unavailable)."}</p>}
+          </section>
       )}
       {!expanded && error && <div className="compact-error" role="alert" title={error}>!</div>}
     </main>

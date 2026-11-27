@@ -11,6 +11,7 @@ name = "oplyra_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
+cc = "1"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
@@ -24,3 +25,5 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "NSRunningApplication", "libc"] }
+
+tauri-nspanel = "=2.1.1"

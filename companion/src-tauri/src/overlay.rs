@@ -3,6 +3,46 @@
 use std::sync::{Mutex, atomic::{AtomicBool, Ordering}};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder};
 
+#[cfg(target_os = "macos")]
+use tauri_nspanel::{ManagerExt, WebviewWindowExt, StyleMask};
+#[cfg(target_os = "macos")]
+use tauri_nspanel::objc2_foundation::NSObjectProtocol;
+#[cfg(target_os = "macos")]
+use tauri_nspanel::objc2::{ClassType, Message};
+
+#[cfg(target_os = "macos")]
+tauri_nspanel::panel!(OplyraPanel {
+    config: { can_become_key_window: true, can_become_main_window: false }
+});
+
+#[cfg(target_os = "macos")]
+pub fn configure_panel(window: &WebviewWindow) -> Result<(), String> {
+    let panel = window.to_panel::<OplyraPanel>().map_err(|e| e.to_string())?;
+    panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
+    panel.set_floating_panel(true);
+    panel.set_becomes_key_only_if_needed(true);
+    panel.set_hides_on_deactivate(false);
+    panel.set_transparent(true);
+    panel.set_has_shadow(false);
+    panel.set_level(3);
+    panel.order_front_regardless();
+    Ok(())
+}
+
+// Synchronous Tauri commands execute on the UI thread. Only an explicit
+// text-field click requests keyboard focus, never a drag or notification.
+#[tauri::command]
+pub fn panel_keyboard(app: AppHandle, enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let panel = app.get_webview_panel("main").map_err(|_| "Companion panel unavailable")?;
+        if enabled { panel.make_key_window(); } else { panel.resign_key_window(); }
+    }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = (app, enabled); }
+    Ok(())
+}
+
 #[derive(Default)]
 struct UiMemory {
     draft: String,
@@ -58,6 +98,11 @@ fn destroy_main(app: &AppHandle) -> Result<(), String> {
     destroy_bin(app)?;
     if let Some(window) = app.get_webview_window("main") {
         window.hide().map_err(|e| e.to_string())?;
+        #[cfg(target_os = "macos")]
+        if let Ok(panel) = app.get_webview_panel("main") {
+            panel.to_window().ok_or("Could not release native panel")?;
+            let _ = app.remove_webview_panel("main");
+        }
         window.destroy().map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -93,7 +138,6 @@ pub fn request_hide(app: &AppHandle) {
 pub fn request_show(app: AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
-        let _ = window.set_focus();
         return;
     }
     let state = app.state::<OverlayState>();
@@ -103,10 +147,25 @@ pub fn request_show(app: AppHandle) {
     // callbacks on Windows. The same worker path is used on macOS.
     std::thread::spawn(move || {
         let result = create_window(&app, "main");
-        app.state::<OverlayState>().showing.store(false, Ordering::Release);
         match result {
-            Ok(window) => { let _ = window.set_focus(); }
-            Err(e) => eprintln!("Oplyra restore failed: {e}"),
+            Ok(window) => {
+                #[cfg(target_os = "macos")]
+                {
+                    let handle = app.clone();
+                    let scheduled = app.run_on_main_thread(move || {
+                        if let Err(e) = configure_panel(&window) {
+                            eprintln!("Oplyra panel configuration failed: {e}");
+                            let _ = window.hide();
+                            let _ = window.destroy();
+                        }
+                        handle.state::<OverlayState>().showing.store(false, Ordering::Release);
+                    });
+                    if scheduled.is_err() { app.state::<OverlayState>().showing.store(false, Ordering::Release); }
+                }
+                #[cfg(not(target_os = "macos"))]
+                { let _ = window.show(); app.state::<OverlayState>().showing.store(false, Ordering::Release); }
+            }
+            Err(e) => { app.state::<OverlayState>().showing.store(false, Ordering::Release); eprintln!("Oplyra restore failed: {e}"); }
         }
     });
 }

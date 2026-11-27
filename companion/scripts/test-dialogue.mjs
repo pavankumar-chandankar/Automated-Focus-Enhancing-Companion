@@ -7,7 +7,7 @@ const input = await readFile(new URL("../src/dialogue.ts", import.meta.url), "ut
 const { outputText } = ts.transpileModule(input, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
 });
-const { planMessage, restingBehaviour, actionAllowed, confirmedPlan, resolveConfirmation, proposalQuestion, rememberTurn, awarenessCommand } = await import("data:text/javascript;base64," + Buffer.from(outputText).toString("base64"));
+const { planMessage, restingBehaviour, actionAllowed, confirmedPlan, resolveConfirmation, proposalQuestion, rememberTurn, awarenessCommand, screenCommand } = await import("data:text/javascript;base64," + Buffer.from(outputText).toString("base64"));
 const cases = [
   ["Let's study together.", "idle", "start", "working"],
   ["I need to work on my paper", "idle", "start", "working"],
@@ -86,3 +86,14 @@ assert.equal(awarenessCommand("Stop watching"), "disable");
 assert.equal(awarenessCommand("What can you see?"), "status");
 for (const text of ["Don't watch my activity", "Should I watch my activity?", "watch my activity and finish", '"watch my activity"']) assert.equal(awarenessCommand(text), null);
 console.log("Local awareness consent command assertions passed.");
+
+assert.equal(screenCommand("Watch my screen."), "choose");
+assert.equal(screenCommand("What can you read?"), "preview");
+assert.equal(screenCommand("Stop watching my screen"), "stop");
+for (const text of ["Don't watch my screen", "Should I watch my screen?", '"watch my screen"', "watch my screen and analyze"]) assert.equal(screenCommand(text), null);
+console.log("Screen consent command assertions passed.");
+
+assert.equal(screenCommand("Follow my work"), "choose");
+assert.equal(screenCommand("What am I working on?"), "preview");
+assert.equal(screenCommand("Summarize my screen"), "preview");
+assert.equal(screenCommand("Don't follow my screen"), null);
