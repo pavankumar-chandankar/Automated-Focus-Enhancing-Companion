@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { AnalyticsWindow } from "./Analytics";
+import { Character } from "./Character";
+import { usePresence } from "./usePresence";
 import { getCurrentWindow, currentMonitor, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { companion, type Phase, type SessionSnapshot, type PreviousTurn, type Provider, type AwarenessStatus, type AwarenessCue, type ScreenStatus, type ScreenPreview } from "./native";
+import { companion, type SessionSnapshot, type PreviousTurn, type Provider, type AwarenessStatus, type AwarenessCue, type ScreenStatus, type ScreenPreview } from "./native";
 import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQuestion, resolveConfirmation, rememberTurn, awarenessCommand, screenCommand, monitoringRequest, monitoringGoalFromRequest, type Behaviour, type PendingAction } from "./dialogue";
 
 // Logical pixels. The visible native surface shrinks to the character when closed;
@@ -43,49 +45,6 @@ function DropTarget() {
   );
 }
 
-
-function Character({ phase, behaviour }: { phase: Phase; behaviour: Behaviour }) {
-  return (
-    <svg className={`character-art phase-${phase} behaviour-${behaviour}`} viewBox="0 0 204 180" aria-hidden="true">
-      <defs>
-        <linearGradient id="oplyra-body" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#E2DBFF" />
-          <stop offset=".54" stopColor="#B9B1F6" />
-          <stop offset="1" stopColor="#9188DF" />
-        </linearGradient>
-        <linearGradient id="oplyra-shine" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#FFFFFF" stopOpacity=".8" />
-          <stop offset="1" stopColor="#FFFFFF" stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <ellipse className="creature-shadow" cx="101" cy="166" rx="53" ry="8" fill="#4D456C" opacity=".13" />
-      <g className="creature-float">
-        <path d="M62 108 Q34 103 38 128 Q47 145 63 123" fill="#A79EEE" />
-        <path d="M144 108 Q166 101 172 124 Q171 137 153 127" fill="#9789DE" />
-        <path d="M77 142 Q71 155 83 156 L93 148" fill="#8173CD" />
-        <path d="M117 148 L129 156 Q141 155 132 142" fill="#8173CD" />
-        <path d="M68 53 Q62 27 78 22 Q95 23 98 50" fill="#C9C1F8" />
-        <path d="M118 50 Q127 22 143 28 Q156 38 144 58" fill="#AFA5F0" />
-        <path d="M45 107 C41 64 60 41 100 39 C140 37 162 64 163 109 C164 144 142 157 102 157 C64 157 45 140 45 107Z" fill="url(#oplyra-body)" />
-        <path d="M60 86 C63 58 82 49 107 50 C91 53 73 68 69 91Z" fill="url(#oplyra-shine)" />
-        <ellipse cx="73" cy="110" rx="13" ry="7" fill="#FFB4C9" opacity=".6" />
-        <ellipse cx="135" cy="110" rx="13" ry="7" fill="#FFB4C9" opacity=".6" />
-        {behaviour === "resting" ? (
-          <g fill="none" stroke="#3C365A" strokeLinecap="round" strokeWidth="4.5">
-            <path d="M75 94 Q85 88 95 94" /><path d="M117 94 Q127 88 137 94" />
-          </g>
-        ) : (
-          <g className="eyes" fill="#352F53">
-            <ellipse cx="84" cy="93" rx="5.4" ry="8" /><ellipse cx="125" cy="93" rx="5.4" ry="8" />
-          </g>
-        )}
-        <path d={phase === "running" ? "M96 117 Q104 124 112 117" : "M99 117 Q104 121 109 117"} fill="none" stroke="#544B77" strokeWidth="3.3" strokeLinecap="round" />
-        {behaviour === "working" && <g className="work-book" stroke="#7968ba" strokeWidth="1.7" strokeLinejoin="round"><path d="M73 130 Q89 124 103 134 Q117 124 133 130 L132 149 Q117 145 103 154 Q89 145 74 149Z" fill="#f6f0ff"/><path d="M103 134V154" fill="none"/></g>}
-        {behaviour === "celebrating" && <g className="celebrate-spark" fill="#e5ab53"><path d="M37 44 l3 8 8 3 -8 3 -3 8 -3 -8 -8 -3 8 -3Z"/><path d="M170 28 l3 8 8 3 -8 3 -3 8 -3 -8 -8 -3 8 -3Z"/></g>}
-      </g>
-    </svg>
-  );
-}
 
 function CompanionApp() {
   const [current, setCurrent] = useState<SessionSnapshot | null>(null);
@@ -133,6 +92,7 @@ function CompanionApp() {
   const visibilityEpoch = useRef(0);
   const actionRunning = useRef(false);
   const [error, setError] = useState("");
+  const presence = usePresence({ phase: current?.phase ?? "idle", quiet: current?.quiet_mode ?? true, ready: ready && current !== null, dragging, busy, reminder: !!ambientCue, expanded, reaction, reply });
 
   useEffect(() => {
     let active = true;
@@ -477,6 +437,7 @@ function CompanionApp() {
   function onCharacterPointerDown(event: ReactPointerEvent<HTMLButtonElement>) {
     if (event.button !== 0 || resizing || held.current || finishingDrag.current || hiding.current) return;
     event.preventDefault();
+    presence.down();
     event.currentTarget.setPointerCapture(event.pointerId);
     const gesture: DragGesture = {
       pointerId: event.pointerId,
@@ -499,6 +460,13 @@ function CompanionApp() {
   }
 
   function onCharacterPointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    if (bounds.width && bounds.height) {
+      const x = Math.max(-4, Math.min(4, ((event.clientX - bounds.left) / bounds.width - .5) * 8));
+      const y = Math.max(-3, Math.min(3, ((event.clientY - bounds.top) / bounds.height - .5) * 6));
+      event.currentTarget.style.setProperty("--gaze-x", x + "px");
+      event.currentTarget.style.setProperty("--gaze-y", y + "px");
+    }
     const gesture = held.current;
     if (!gesture || gesture.pointerId !== event.pointerId || gesture.ended) return;
     gesture.latestX = event.screenX;
@@ -520,6 +488,7 @@ function CompanionApp() {
     if (!gesture || gesture.pointerId !== event.pointerId) return;
     held.current = null;
     gesture.ended = true;
+    presence.up(cancelled, gesture.started);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
@@ -771,7 +740,6 @@ function CompanionApp() {
   }, [expanded, resizing]);
 
   const phase = current?.phase ?? "idle";
-  const behaviour = checkIn && !expanded ? "attentive" : reaction ?? (expanded ? "attentive" : restingBehaviour(phase));
   const phaseName = screen?.active && phase === "running" ? (screen.monitoring ? "Monitoring on" : screen.sample_ready ? "Screen · read" : "Screen · local") : awareness?.enabled && phase === "running" ? (checkIn ? "Check-in · aware" : "Working · aware") : phase === "running" ? "Working together" : phase === "paused" ? "On a break" : "Here with you";
 
   return (
@@ -780,6 +748,8 @@ function CompanionApp() {
         <button
           type="button"
           className="character-button"
+          onPointerEnter={presence.enter}
+          onPointerLeave={(event) => { presence.leave(); event.currentTarget.style.removeProperty("--gaze-x"); event.currentTarget.style.removeProperty("--gaze-y"); }}
           onPointerDown={onCharacterPointerDown}
           onPointerMove={onCharacterPointerMove}
           onPointerUp={(event) => endCharacterPointer(event, false)}
@@ -795,7 +765,7 @@ function CompanionApp() {
           aria-label={`${phaseName}. Click to ${expanded ? "close" : "open"} controls; click and drag to move; drop on the bottom-centre bin to hide.`}
           title="Click for controls · Drag immediately to move · Drop on bin to hide"
         >
-          <Character phase={phase} behaviour={behaviour} />
+          <Character pose={presence.pose} visible={presence.visible} />
         </button>
         <div className="character-status" role="status">
           <span className={`status-light status-${phase}`} />
