@@ -218,10 +218,13 @@ impl Drop for Slot {
     fn drop(&mut self) { BUSY.store(false, Ordering::Release); }
 }
 
-pub fn generate(message: &str, snapshot: &SessionSnapshot, history: &[PreviousTurn]) -> Result<ModelReply, String> {
+pub fn generate(message: &str, snapshot: &SessionSnapshot, history: &[PreviousTurn], screen_active: bool) -> Result<ModelReply, String> {
     let provider = configured_provider()?;
     let model = match provider { Provider::Local => configured_local_model()?, Provider::Deepseek => CLOUD_MODEL, Provider::Groq => GROQ_MODEL };
-    let body = request_body(message, snapshot, history, provider, model)?;
+    let mut body = request_body(message, snapshot, history, provider, model)?;
+    // Only the consent state, never OCR or window identifiers, enters normal chat.
+    let base = body["messages"][0]["content"].as_str().unwrap_or_default().to_owned();
+    body["messages"][0]["content"] = json!(format!("{base}\nLocal window OCR authorization: {}. No screen text is supplied to this chat. Authorization does not mean text was successfully recognized.", if screen_active {"on"} else {"off"}));
     let start = Instant::now();
     let generated = send_request(provider, &body)?;
     if generated.proposal.is_some_and(|intent| !intent.allowed(snapshot.phase)) {

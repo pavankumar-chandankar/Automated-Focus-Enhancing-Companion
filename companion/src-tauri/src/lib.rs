@@ -126,9 +126,10 @@ fn intelligence_provider() -> Result<intelligence::Provider, String> { intellige
 
 // Model output is a reply or a bounded proposal, never a native action.
 #[tauri::command]
-async fn local_companion_reply(store: State<'_, SessionStore>, message: String, history: Vec<intelligence::PreviousTurn>) -> Result<intelligence::ModelReply, String> {
+async fn local_companion_reply(store: State<'_, SessionStore>, screen: State<'_, screen::ScreenState>, message: String, history: Vec<intelligence::PreviousTurn>) -> Result<intelligence::ModelReply, String> {
     let snapshot = store.snapshot()?;
-    tauri::async_runtime::spawn_blocking(move || intelligence::generate(&message, &snapshot, &history))
+    let screen_active = screen::observation_active(&screen);
+    tauri::async_runtime::spawn_blocking(move || intelligence::generate(&message, &snapshot, &history, screen_active))
         .await.map_err(|_| "Local intelligence worker failed".to_owned())?
 }
 
@@ -179,7 +180,10 @@ fn finish_companion_drag(app: tauri::AppHandle) -> Result<bool, String> {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+    builder
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             // A second launch must not resurrect a companion hidden in the tray.
             let _ = app;
@@ -195,6 +199,9 @@ pub fn run() {
             let path = app.path().app_local_data_dir()?.join("session.json");
             let store = SessionStore::read(path).map_err(std::io::Error::other)?;
             app.manage(store);
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") { overlay::configure_panel(&window).map_err(std::io::Error::other)?; }
+            screen::start_worker(app.handle().clone());
             let show = MenuItem::with_id(app, "show", "Show Oplyra", true, None::<&str>)?;
             let hide = MenuItem::with_id(app, "hide", "Hide Oplyra", true, None::<&str>)?;
             let stop_awareness = MenuItem::with_id(app, "stop-awareness", "Stop activity awareness", true, None::<&str>)?;
@@ -230,7 +237,7 @@ pub fn run() {
             save_next_step, set_quiet_mode, resume_with_assistance, set_support_mode,
             record_cue_feedback, reset_cue_preference, local_companion_reply, intelligence_provider, begin_companion_drag,
             finish_companion_drag, cancel_companion_drag,
-            overlay::load_overlay_draft, overlay::hide_companion,
+            overlay::load_overlay_draft, overlay::hide_companion, overlay::panel_keyboard,
             awareness::set_awareness, awareness::awareness_status, awareness::sample_awareness, awareness::suspend_awareness,
             screen::screen_status, screen::request_screen_permission, screen::list_screen_windows,
             screen::select_screen_window, screen::sample_screen, screen::stop_screen,

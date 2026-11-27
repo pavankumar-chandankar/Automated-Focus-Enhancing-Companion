@@ -25,11 +25,12 @@ export type ModelReply = { provider: Provider; model: string; reply: string; rea
 export type AwarenessCue = "leisure_check" | "return_check";
 export type AwarenessStatus = { enabled: boolean; supported: boolean; category: "leisure" | "browser" | "other" | "unavailable"; cue: AwarenessCue | null };
 
-export type ScreenStatus = { supported: boolean; active: boolean; app: string | null; sample_ready: boolean };
+export type ScreenStatus = { supported: boolean; active: boolean; app: string | null; sample_ready: boolean; detail: string; cue: boolean };
 export type WindowChoice = { id: number; pid: number; bundle: string; app: string; title: string };
 export type ScreenPreview = { id: number; excerpt: string; goal: string; remaining_today: number; valid_for_ms: number };
 
 export const companion = {
+  panelKeyboard: (enabled: boolean) => invoke<void>("panel_keyboard", { enabled }),
   screenStatus: () => invoke<ScreenStatus>("screen_status"),
   requestScreenPermission: () => invoke<void>("request_screen_permission"),
   listScreenWindows: () => invoke<WindowChoice[]>("list_screen_windows"),

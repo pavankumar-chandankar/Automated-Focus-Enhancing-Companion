@@ -92,3 +92,8 @@ assert.equal(screenCommand("What can you read?"), "preview");
 assert.equal(screenCommand("Stop watching my screen"), "stop");
 for (const text of ["Don't watch my screen", "Should I watch my screen?", '"watch my screen"', "watch my screen and analyze"]) assert.equal(screenCommand(text), null);
 console.log("Screen consent command assertions passed.");
+
+assert.equal(screenCommand("Follow my work"), "choose");
+assert.equal(screenCommand("What am I working on?"), "preview");
+assert.equal(screenCommand("Summarize my screen"), "preview");
+assert.equal(screenCommand("Don't follow my screen"), null);

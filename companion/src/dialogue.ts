@@ -21,8 +21,8 @@ export function awarenessCommand(input: string): "enable" | "disable" | "status"
 // select windows, activate capture, or authorize cloud transmission.
 export function screenCommand(input: string): "choose" | "preview" | "stop" | null {
   const text = input.trim().toLowerCase().replace(/[’‘]/g, "'").replace(/[.!?]+$/, "").trim().replace(/\s+/g, " ");
-  if (/^(?:watch my screen|read my screen|watch my window|choose a window|enable screen awareness)$/.test(text)) return "choose";
-  if (/^(?:what can you read|read my window|analyze my window|analyse my window|show me what you read|what did you read)$/.test(text)) return "preview";
+  if (/^(?:watch my screen|read my screen|watch my window|choose a window|enable screen awareness|follow my work|follow my screen)$/.test(text)) return "choose";
+  if (/^(?:what can you read|read my window|analyze my window|analyse my window|show me what you read|what did you read|what am i working on|what am i doing|what do you see|what is on my screen|what\x27s on my screen|summarize my screen|summarise my screen|read the screen|what can you see on my screen)$/.test(text)) return "preview";
   if (/^(?:stop watching my screen|stop reading my screen|stop screen observation|disable screen awareness|stop watching my window)$/.test(text)) return "stop";
   return null;
 }

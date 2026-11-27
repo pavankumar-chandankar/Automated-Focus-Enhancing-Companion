@@ -25,6 +25,8 @@ pub struct ScreenStatus {
     active: bool,
     app: Option<String>,
     sample_ready: bool,
+    detail: String,
+    cue: bool,
 }
 
 #[derive(Clone)]
@@ -54,6 +56,10 @@ struct Observation {
     serial: u32,
     latest: Option<Sample>,
     reviewed: Option<(u32, String)>,
+    detail: String,
+    missing_since: Option<Instant>,
+    last_cue: Option<Instant>,
+    cues: u8,
 }
 impl Observation {
     fn reset(&mut self) {
@@ -64,6 +70,7 @@ impl Observation {
         self.last_attempt = None;
         self.latest = None;
         self.reviewed = None;
+        self.detail.clear(); self.missing_since = None; self.last_cue = None; self.cues = 0;
         // A worker already in progress must finish before another starts.
     }
     fn fresh(&self, now: Instant) -> Option<&Sample> {
@@ -75,6 +82,7 @@ impl Observation {
             active: self.selection.is_some(),
             app: self.selection.as_ref().map(|w| w.app.clone()),
             sample_ready: self.fresh(Instant::now()).is_some(),
+            detail: self.detail.clone(), cue: false,
         }
     }
 }
@@ -155,6 +163,10 @@ pub fn stop_screen(state: State<'_, ScreenState>) -> Result<(), String> {
     Ok(())
 }
 
+pub fn observation_active(state: &ScreenState) -> bool {
+    state.observation.lock().map(|o| o.selection.is_some()).unwrap_or(false)
+}
+
 #[tauri::command]
 pub fn screen_status(state: State<'_, ScreenState>) -> Result<ScreenStatus, String> {
     Ok(state.observation.lock().map_err(|_| "Screen state unavailable")?.status())
@@ -185,8 +197,10 @@ pub async fn list_screen_windows(app: AppHandle) -> Result<Vec<WindowChoice>, St
     let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
     if generation != o.generation || !visible { return Err("Window selection was cancelled".into()); }
     o.choices = choices.clone();
+    // Explicit alternative to a single selected window; never capture a full display.
+    o.choices.insert(0, WindowChoice { id: 0, pid: 0, bundle: String::new(), app: "Follow supported work apps".into(), title: String::new() });
     o.listed_at = Some(Instant::now());
-    Ok(choices)
+    Ok(o.choices.clone())
 }
 
 #[tauri::command]
@@ -197,6 +211,7 @@ pub fn select_screen_window(app: AppHandle, state: State<'_, ScreenState>, id: u
     let choice = o.choices.iter().find(|w| w.id == id).cloned().ok_or("Window was not offered")?;
     o.reset();
     o.selection = Some(choice);
+    o.detail = "Waiting for first capture".into();
     Ok(o.status())
 }
 
@@ -209,10 +224,12 @@ pub async fn sample_screen(app: AppHandle) -> Result<ScreenStatus, String> {
         let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
         if !visible { o.reset(); return Ok(o.status()); }
         let Some(choice) = o.selection.clone() else { return Ok(o.status()); };
-        if !compact || o.busy ||
+        if !compact { o.missing_since = None; return Ok(o.status()); }
+        if o.busy ||
             o.last_attempt.is_some_and(|at| at.elapsed() < SAMPLE_INTERVAL) {
             return Ok(o.status());
         }
+        if o.last_attempt.is_some_and(|at| at.elapsed() > Duration::from_secs(45)) { o.missing_since = None; }
         o.busy = true;
         o.last_attempt = Some(Instant::now());
         (choice, o.generation)
@@ -228,19 +245,43 @@ pub async fn sample_screen(app: AppHandle) -> Result<ScreenStatus, String> {
     if !compact { return Ok(o.status()); }
     o.latest = None;
     o.reviewed = None;
+    let mut cue = false;
     match result {
         Ok(Ok(Some(text))) => {
             let text = normalize(&text);
             if !text.is_empty() {
+                let now = Instant::now();
+                // Only a neutral return cue, never a claim of distraction.
+                let returned = o.missing_since.take().is_some_and(|t| t.elapsed() >= Duration::from_secs(120));
+                if returned && o.cues < 2 && o.last_cue.is_none_or(|t| t.elapsed() >= Duration::from_secs(600)) {
+                    o.cues += 1; o.last_cue = Some(now); cue = true;
+                }
+                o.detail = "Text recognised locally".into();
                 o.serial = o.serial.checked_add(1).ok_or("Screen sample counter exhausted")?;
                 o.latest = Some(Sample { id: o.serial, at: Instant::now(), text });
-            }
+            } else { o.detail = "Captured window; no readable text".into(); o.missing_since = None; }
         }
-        Ok(Ok(None)) => {}
+        Ok(Ok(None)) => { o.detail = "No eligible foreground work window".into(); o.missing_since.get_or_insert(Instant::now()); }
         Ok(Err(err)) => { o.reset(); return Err(err); }
         Err(_) => { o.reset(); return Err("Screen capture worker failed".into()); }
     }
-    Ok(o.status())
+    let mut status = o.status(); status.cue = cue; Ok(status)
+}
+
+// Native scheduler: unaffected by WebKit background timer throttling.
+pub fn start_worker(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(5));
+        let active = app.state::<ScreenState>().observation.lock().map(|o| o.selection.is_some()).unwrap_or(false);
+        if !active { continue; }
+        let result = tauri::async_runtime::block_on(sample_screen(app.clone()));
+        if let Some(window) = app.get_webview_window("main") {
+            match result {
+                Ok(status) => { let _ = window.emit("oplyra-screen-status", status); }
+                Err(error) => { let _ = window.emit("oplyra-screen-error", error); }
+            }
+        }
+    });
 }
 
 fn normalize(text: &str) -> String {

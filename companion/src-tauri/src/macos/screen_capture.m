@@ -90,20 +90,26 @@ char *oplyra_screen_list(void) {
     }
 }
 
-// Verify that the exact selected window is the top normal window of the active
-// application. No window names or metadata from this check leave the bridge.
-static BOOL foreground_window(uint32_t wid, int32_t pid) {
-    if (NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != pid) return NO;
+// Use ScreenCaptureKit eligible windows joined with WindowServer z-order.
+// Ignore transient / tiny auxiliary windows instead of treating the first
+// layer-zero entry as the user's document.
+static SCWindow *foreground_choice(SCShareableContent *content, uint32_t wid, int32_t pid, NSString *bundle) API_AVAILABLE(macos(14.0)) {
+    pid_t active = NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
+    if (active <= 0 || active == getpid() || (wid && active != pid)) return nil;
     CFArrayRef raw = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly |
         kCGWindowListExcludeDesktopElements, kCGNullWindowID);
-    if (!raw) return NO;
-    NSArray *windows = CFBridgingRelease(raw);
-    for (NSDictionary *info in windows) {
-        if ([info[(__bridge NSString *)kCGWindowOwnerPID] intValue] != pid ||
-            [info[(__bridge NSString *)kCGWindowLayer] intValue] != 0) continue;
-        return [info[(__bridge NSString *)kCGWindowNumber] unsignedIntValue] == wid;
+    if (!raw) return nil;
+    NSArray *ordered = CFBridgingRelease(raw);
+    for (NSDictionary *info in ordered) {
+        if ([info[(__bridge NSString *)kCGWindowOwnerPID] intValue] != active) continue;
+        uint32_t candidate = [info[(__bridge NSString *)kCGWindowNumber] unsignedIntValue];
+        for (SCWindow *window in content.windows) {
+            if (window.windowID != candidate || window.owningApplication.processID != active || !eligible(window)) continue;
+            if (wid && (candidate != wid || ![window.owningApplication.bundleIdentifier isEqualToString:bundle])) return nil;
+            return window;
+        }
     }
-    return NO;
+    return nil;
 }
 
 char *oplyra_screen_capture(uint32_t wid, int32_t pid, const char *bundle_utf8) {
@@ -111,19 +117,12 @@ char *oplyra_screen_capture(uint32_t wid, int32_t pid, const char *bundle_utf8) 
         if (@available(macOS 14.0, *)) {
             if (!CGPreflightScreenCaptureAccess()) return failure(@"Screen recording permission was revoked");
             NSString *bundle = [NSString stringWithUTF8String:bundle_utf8];
-            if (!allowed_bundle(bundle)) return failure(@"Window application is not supported");
-            if (!foreground_window(wid, pid)) return json_result(@{@"inactive":@YES});
+            if (wid && !allowed_bundle(bundle)) return failure(@"Window application is not supported");
             SCShareableContent *content = shareable();
             if (!content) return failure(@"Could not inspect selected window");
-            SCWindow *selected = nil;
-            for (SCWindow *window in content.windows) {
-                if (window.windowID == wid && window.owningApplication.processID == pid &&
-                    [window.owningApplication.bundleIdentifier isEqualToString:bundle] && eligible(window)) {
-                    selected = window;
-                    break;
-                }
-            }
-            if (!selected || !foreground_window(wid, pid)) return json_result(@{@"inactive":@YES});
+            SCWindow *selected = foreground_choice(content, wid, pid, bundle);
+            if (!selected) return json_result(@{@"inactive":@YES});
+            pid_t capturedPID = selected.owningApplication.processID;
             SCContentFilter *filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:selected];
             SCStreamConfiguration *configuration = [SCStreamConfiguration new];
             CGSize size = selected.frame.size;
@@ -143,7 +142,7 @@ char *oplyra_screen_capture(uint32_t wid, int32_t pid, const char *bundle_utf8) 
                 }];
             if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 6 * NSEC_PER_SEC)) || !captured)
                 return failure(@"Selected window capture did not complete");
-            if (!foreground_window(wid, pid)) return json_result(@{@"inactive":@YES});
+            if (NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != capturedPID) return json_result(@{@"inactive":@YES});
             VNRecognizeTextRequest *request = [VNRecognizeTextRequest new];
             request.recognitionLevel = VNRequestTextRecognitionLevelFast;
             request.usesLanguageCorrection = NO;

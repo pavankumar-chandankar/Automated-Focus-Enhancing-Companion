@@ -118,6 +118,9 @@ function CompanionApp() {
   const [selectedWindow, setSelectedWindow] = useState("");
   const [screenPreview, setScreenPreview] = useState<ScreenPreview | null>(null);
   const screenEpoch = useRef(0);
+  const screenActive = useRef(false);
+  const [ambientCue, setAmbientCue] = useState("");
+  const ambientTimer = useRef<number | null>(null);
   const [checkIn, setCheckIn] = useState<AwarenessCue | null>(null);
   const checkInExpiry = useRef(0);
   const awarenessPending = useRef<number | null>(null);
@@ -160,6 +163,8 @@ function CompanionApp() {
   }
 
   function clearScreen() {
+    screenActive.current = false;
+    setAmbientCue("");
     clearScreenPanel();
     setScreen(old => old ? {...old, active: false, app: null, sample_ready: false} : null);
   }
@@ -172,29 +177,34 @@ function CompanionApp() {
     return () => { disposed = true; cleanup?.(); };
   }, []);
 
+  function showAmbient(text: string) {
+    if (expandedRef.current || held.current || hiding.current || actionRunning.current) return;
+    if (ambientTimer.current !== null) window.clearTimeout(ambientTimer.current);
+    setAmbientCue(text);
+    ambientTimer.current = window.setTimeout(() => { setAmbientCue(""); ambientTimer.current = null; }, 12000);
+  }
+
   useEffect(() => {
-    if (!screen?.active || current?.phase !== "running" || expanded || dragging || busy || !ready) return;
     let disposed = false;
-    let inFlight = false;
-    const poll = async () => {
-      if (disposed || inFlight || expandedRef.current || held.current || hiding.current || document.hidden) return;
-      inFlight = true;
-      const epoch = screenEpoch.current;
-      try {
-        const status = await companion.sampleScreen();
-        if (!disposed && epoch === screenEpoch.current && !expandedRef.current && !hiding.current) setScreen(status);
-      } catch (failure) {
-        if (!disposed && epoch === screenEpoch.current) {
-          clearScreen();
-          setError("Screen observation stopped: " + String(failure));
-          void companion.stopScreen().catch(() => {});
-        }
-      } finally { inFlight = false; }
+    const cleanups: (() => void)[] = [];
+    const subscribe = async () => {
+      const first = await appWindow.listen<ScreenStatus>("oplyra-screen-status", ({payload}) => {
+        if (disposed || !screenActive.current || hiding.current) return;
+        setScreen(payload);
+        if (!payload.active) { clearScreen(); return; }
+        if (payload.cue) showAmbient("Welcome back. Ready to continue?");
+      });
+      if (disposed) { first(); return; } cleanups.push(first);
+      const second = await appWindow.listen<string>("oplyra-screen-error", ({payload}) => {
+        if (disposed || !screenActive.current) return;
+        clearScreen();
+        setError("Screen observation stopped: " + payload);
+      });
+      if (disposed) second(); else cleanups.push(second);
     };
-    void poll();
-    const timer = window.setInterval(() => { void poll(); }, 15000);
-    return () => { disposed = true; window.clearInterval(timer); };
-  }, [screen?.active, current?.phase, expanded, dragging, busy, ready]);
+    void subscribe().catch(() => {});
+    return () => { disposed = true; cleanups.forEach(fn => fn()); if (ambientTimer.current !== null) window.clearTimeout(ambientTimer.current); };
+  }, []);
 
   // Native UI confirmation buttons, not model-generated instructions.
   async function screenOperation(operation: () => Promise<void>) {
@@ -220,7 +230,7 @@ function CompanionApp() {
       setWindows(choices);
       setSelectedWindow("");
       setScreenPanel("choose");
-      setReply(choices.length ? "Choose one work window. I'll read it locally only when it's in front." : "No supported visible work windows found. Open a browser or document and try again.");
+      setReply(choices.length ? "Choose a single window or follow supported work apps. Local OCR only." : "No supported visible work windows found. Open a browser or document and try again.");
     });
   }
 
@@ -233,8 +243,9 @@ function CompanionApp() {
         await companion.stopScreen(); return;
       }
       clearScreenPanel();
+      screenActive.current = status.active;
       setScreen(status);
-      setReply("Window observation is on. Close this bubble, use the chosen window, then ask what I can read.");
+      setReply("Local observation is on. Close this bubble and carry on working. Ask what I can read whenever you want.");
       setSource("command");
     });
   }
@@ -304,7 +315,7 @@ function CompanionApp() {
         if (disposed || epoch !== awarenessEpoch.current || expandedRef.current || hiding.current) return;
         setAwareness(result);
         if (!result.enabled) setCheckIn(null);
-        else if (result.cue) { checkInExpiry.current = performance.now() + 60_000; setCheckIn(result.cue); }
+        else if (result.cue) { checkInExpiry.current = performance.now() + 60_000; setCheckIn(result.cue); showAmbient(result.cue === "leisure_check" ? "Still on task, or taking a break?" : "Welcome back. Ready to continue?"); }
         else if (performance.now() >= checkInExpiry.current) setCheckIn(null);
       } catch {
         if (!disposed && epoch === awarenessEpoch.current) {
@@ -369,7 +380,14 @@ function CompanionApp() {
     if (resizing) return;
     setResizing(true);
     setError("");
-    if (!open) { visibilityEpoch.current += 1; pendingAction.current = null; awarenessPending.current = null; clearScreenPanel(); }
+    if (!open) {
+      visibilityEpoch.current += 1;
+      if (pendingAction.current || awarenessPending.current !== null || screenPanel || busy) {
+        setReply("Ready when you are."); setSource(null);
+      }
+      pendingAction.current = null; awarenessPending.current = null; clearScreenPanel();
+      void companion.panelKeyboard(false).catch(() => {});
+    }
     else { screenEpoch.current += 1; }
     if (open && awareness?.enabled) {
       awarenessEpoch.current += 1;
@@ -381,8 +399,9 @@ function CompanionApp() {
       expandedRef.current = open;
       visibilityEpoch.current += 1;
       setExpanded(open);
-      if (!open) clearConversation();
-      else if (checkIn && performance.now() < checkInExpiry.current) {
+      // Folding is presentation only; keep the latest ordinary reply and chat history.
+      if (open) setAmbientCue("");
+      if (open && checkIn && performance.now() < checkInExpiry.current) {
         setReply(checkIn === "leisure_check" ? "Still on task, or taking a break?" : "Welcome back. Ready to pick up where you left off?");
         setReaction("attentive");
         setSource("command");
@@ -428,6 +447,7 @@ function CompanionApp() {
       clearScreenPanel();
       awarenessEpoch.current += 1;
       setCheckIn(null);
+      setAmbientCue("");
       if (awareness?.enabled) void companion.suspendAwareness().catch(() => {});
       if (pendingAction.current) {
         pendingAction.current = null;
@@ -547,8 +567,10 @@ function CompanionApp() {
           const epoch = screenEpoch.current;
           await companion.stopScreen();
           if (epoch !== screenEpoch.current || hiding.current || !expandedRef.current) return;
+          screenActive.current = false;
+          setAmbientCue("");
           setScreen(old => old ? {...old, active:false, app:null, sample_ready:false} : null);
-          setReply("I can read one work window locally. Choose it yourself. Avoid passwords or sensitive pages. Nothing is sent to Groq unless you review and approve it.");
+          setReply("I can read a chosen window, or follow supported work apps locally. Avoid sensitive pages. Nothing is sent to Groq unless you review and approve it.");
           setScreenPanel("permission");
         });
         return;
@@ -771,6 +793,7 @@ function CompanionApp() {
           <span className={`status-light status-${phase}`} />
           <span>{phaseName}</span>
         </div>
+        {!expanded && !dragging && ambientCue && <div className="ambient-cue" role="status">{ambientCue}</div>}
       </div>
 
       {expanded && (
@@ -787,7 +810,8 @@ function CompanionApp() {
               <option value="">Select a window…</option>
               {windows.map(w => <option key={w.id} value={w.id}>{w.app}{w.title ? " — " + w.title : ""}</option>)}
             </select>
-            <button type="button" disabled={busy || !selectedWindow} onClick={startWindow}>Watch this window</button>
+            <p className="screen-detail">Follow mode reads whichever supported work window is in front, including browser tabs. Avoid sensitive pages.</p>
+            <button type="button" disabled={busy || !selectedWindow} onClick={startWindow}>{selectedWindow === "0" ? "Follow work apps locally" : "Watch this window"}</button>
             <button type="button" className="secondary-screen" disabled={busy} onClick={clearScreenPanel}>Cancel</button>
           </div>}
           {screenPanel === "preview" && screenPreview && <div className="screen-controls">
@@ -800,13 +824,14 @@ function CompanionApp() {
           <form className="conversation-form" onSubmit={(event) => { event.preventDefault(); void sendMessage(); }}>
             <input aria-label="Type to Oplyra" value={message} maxLength={300}
               placeholder={pendingAction.current || awarenessPending.current !== null ? "Yes or no…" : "Say something…"} disabled={!ready || !current || busy}
+              onPointerDown={() => { void companion.panelKeyboard(true).catch(() => {}); }}
               onChange={(event) => setMessage(event.target.value)} />
             <button type="submit" aria-label="Send message" disabled={busy || !ready || !current || !message.trim()}>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
             </button>
           </form>
           <p className="conversation-note">{awarenessPending.current !== null ? "Reply yes or no · awareness is off" : pendingAction.current ? "Reply yes or no · no change yet" : source === "local" || source === "deepseek" || source === "groq" ? `${source === "groq" ? "GPT-OSS-120B · Groq" : source === "deepseek" ? "DeepSeek · online" : activeModel ?? "Local AI"} · ${((latency ?? 0) / 1000).toFixed(1)} s` : source === "fallback" ? aiNotice || "AI unavailable · basic response" : provider === "groq" ? "Groq online · chat and session context sent" : provider === "deepseek" ? "DeepSeek online · chat and session context sent" : provider === "local" ? "On-device · Talk to Oplyra." : "AI provider loading…"} </p>
-          {screen?.active && <p className="screen-detail">Local OCR · {screen.app} · {screen.sample_ready ? "text available" : "waiting for window"} · say “stop watching my screen”</p>}
+          {screen?.active && <p className="screen-detail">Local OCR · {screen.app} · {screen.detail || (screen.sample_ready ? "text available" : "waiting for window")} · say “stop watching my screen”</p>}
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
       )}

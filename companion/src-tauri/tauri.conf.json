@@ -25,7 +25,9 @@
         "resizable": false,
         "maximizable": false,
         "fullscreen": false,
-        "visible": true
+        "visible": true,
+        "focus": false,
+        "acceptFirstMouse": true
       },
       {
         "label": "drop-zone",
@@ -44,7 +46,8 @@
         "fullscreen": false,
         "visible": false,
         "focusable": false,
-        "create": false
+        "create": false,
+        "focus": false
       }
     ],
     "security": {
