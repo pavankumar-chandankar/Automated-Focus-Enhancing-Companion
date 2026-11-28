@@ -2,10 +2,12 @@ name: Desktop companion checks
 on:
   push:
     paths:
+      - "gateway/**"
       - "companion/**"
       - ".github/workflows/companion-ci.yml"
   pull_request:
     paths:
+      - "gateway/**"
       - "companion/**"
       - ".github/workflows/companion-ci.yml"
 permissions:
@@ -26,6 +28,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: companion/src-tauri
+      - name: Test inference gateway
+        run: node --test gateway/worker.test.mjs
       - name: Install frontend dependencies
         working-directory: companion
         run: npm install --no-audit --no-fund
