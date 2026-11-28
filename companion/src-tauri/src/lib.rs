@@ -6,6 +6,7 @@ mod awareness;
 mod screen;
 mod monitor;
 mod chrome_tab;
+mod desktop;
 use policy::{Feedback, SupportMode};
 
 use std::{fs, path::PathBuf, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
@@ -295,12 +296,14 @@ pub fn run() {
             // A second launch must not resurrect a companion hidden in the tray.
             let _ = app;
         }))
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             #[cfg(target_os = "macos")]
             {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
             app.manage(overlay::OverlayState::default());
+            app.manage(desktop::DesktopState::new(app.path().app_local_data_dir()?.join("desktop.json")));
             app.manage(awareness::AwarenessState::default());
             app.manage(screen::ScreenState::new(app.path().app_local_data_dir()?.join("screen-budget.json")));
             let path = app.path().app_local_data_dir()?.join("session.json");
@@ -308,22 +311,30 @@ pub fn run() {
             app.manage(store);
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") { overlay::configure_panel(&window).map_err(std::io::Error::other)?; }
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(e) = desktop::restore(&window) { eprintln!("Desktop restore: {e}"); }
+            }
+            desktop::register_shortcuts(app.handle());
             screen::start_worker(app.handle().clone());
             let show = MenuItem::with_id(app, "show", "Show Oplyra", true, None::<&str>)?;
             let hide = MenuItem::with_id(app, "hide", "Hide Oplyra", true, None::<&str>)?;
             let stop_awareness = MenuItem::with_id(app, "stop-awareness", "Stop activity awareness", true, None::<&str>)?;
             let stop_screen = MenuItem::with_id(app, "stop-screen", "Stop screen observation", true, None::<&str>)?;
             let control = MenuItem::with_id(app, "control-center", "Open Control Center", true, None::<&str>)?;
+            let chat = MenuItem::with_id(app, "open-chat", "Open conversation", true, None::<&str>)?;
+            let reset = MenuItem::with_id(app, "reset-position", "Reset companion position", true, None::<&str>)?;
             let analytics = MenuItem::with_id(app, "analytics", "Open analytics", true, None::<&str>)?;
             let test_cue = MenuItem::with_id(app, "test-cue", "Test reminder bubble", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&control, &show, &hide, &analytics, &test_cue, &stop_awareness, &stop_screen, &quit])?;
+            let menu = Menu::with_items(app, &[&control, &show, &hide, &chat, &reset, &analytics, &test_cue, &stop_awareness, &stop_screen, &quit])?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("app icon").clone())
                 .tooltip("Oplyra")
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| match event.id.as_ref() {
+                    "open-chat" => desktop::request_chat(app),
+                    "reset-position" => { if let Err(e) = desktop::desktop_reset(app.clone(), app.state::<desktop::DesktopState>()) { eprintln!("Reset position: {e}"); } },
                     "show" => overlay::request_show(app.clone()),
                     "hide" => overlay::request_hide(app),
                     "stop-awareness" => awareness::stop(app),
@@ -355,7 +366,9 @@ pub fn run() {
             screen::screen_status, screen::request_screen_permission, screen::start_follow_screen, screen::list_screen_windows,
             screen::select_screen_window, screen::sample_screen, screen::stop_screen,
             screen::preview_screen, screen::analyze_screen, screen::get_analytics, screen::dismiss_focus_cue, screen::set_monitor_folded, open_analytics,
-            open_control_center, control_status, control_action, control_visibility, control_quit
+            open_control_center, control_status, control_action, control_visibility, control_quit,
+            desktop::desktop_status, desktop::desktop_layout, desktop::desktop_update, desktop::desktop_reset,
+            desktop::desktop_cursor, desktop::desktop_take_chat
         ])
         .build(tauri::generate_context!())
         .expect("error while building Oplyra desktop")

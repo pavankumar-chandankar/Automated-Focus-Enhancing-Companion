@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { companion, type ControlStatus, type ControlAction } from "./native";
+import { companion, type ControlStatus, type ControlAction, type DesktopStatus, type ChatSize } from "./native";
 import { sessionActions, elapsedLabel } from "./controlLogic";
 import "./control-center.css";
 
-type Page = "overview" | "focus" | "monitoring" | "about";
+type Page = "overview" | "focus" | "monitoring" | "desktop" | "about";
 const nav: {id: Page; label: string; icon: string}[] = [
   {id:"overview",label:"Overview",icon:"overview"},
   {id:"focus",label:"Focus session",icon:"focus"},
   {id:"monitoring",label:"Monitoring",icon:"shield"},
+  {id:"desktop",label:"Desktop",icon:"desktop"},
   {id:"about",label:"About",icon:"info"},
 ];
 function Icon({name}: {name:string}) {
@@ -15,6 +16,7 @@ function Icon({name}: {name:string}) {
     overview:"M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z",
     focus:"M12 8v5l3 2 M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20",
     shield:"M12 3 4 6v6c0 5 5 8 8 9 3-1 8-4 8-9V6z M9 12l2 2 4-4",
+    desktop:"M3 4h18v13H3z M9 21h6 M12 17v4",
     info:"M12 11v6 M12 7h.01 M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20",
     chart:"M4 20V4 M4 20h16 M8 16v-4 M12 16V8 M16 16V5",
   };
@@ -23,6 +25,7 @@ function Icon({name}: {name:string}) {
 export function ControlCenter() {
   const [page,setPage]=useState<Page>("overview");
   const [status,setStatus]=useState<ControlStatus|null>(null);
+  const [desktop,setDesktop]=useState<DesktopStatus|null>(null);
   const [goal,setGoal]=useState("");
   const [step,setStep]=useState("");
   const [busy,setBusy]=useState(false);
@@ -38,8 +41,8 @@ export function ControlCenter() {
       if (!mounted || inFlight || lock.current || document.hidden) return;
       inFlight=true; const generation=pollGeneration.current;
       try {
-        const value=await companion.controlStatus();
-        if(mounted && generation===pollGeneration.current){setStatus(value);setStale(false);}
+        const [value,settings]=await Promise.all([companion.controlStatus(),companion.desktopStatus()]);
+        if(mounted && generation===pollGeneration.current){setStatus(value);setDesktop(settings);setStale(false);}
       } catch {
         if(mounted && generation===pollGeneration.current){setStale(true);}
       } finally {inFlight=false;}
@@ -52,7 +55,7 @@ export function ControlCenter() {
   async function run(operation:()=>Promise<unknown>, success?:string) {
     if(lock.current)return;
     lock.current=true;pollGeneration.current++;setBusy(true);setError("");setNotice("");
-    try {await operation();setStatus(await companion.controlStatus());setStale(false);if(success)setNotice(success);}
+    try {await operation();setStatus(await companion.controlStatus());setDesktop(await companion.desktopStatus());setStale(false);if(success)setNotice(success);}
     catch(e){setError(String(e));try {setStatus(await companion.controlStatus());setStale(false);}catch{setStale(true);}}
     finally{lock.current=false;setBusy(false);}
   }
@@ -90,10 +93,10 @@ export function ControlCenter() {
     <aside className="cc-sidebar">
       <div className="cc-brand"><span className="cc-brandmark">o</span><div><strong>Oplyra</strong><small>CONTROL CENTER</small></div></div>
       <nav aria-label="Control Center">{nav.map(item=><button key={item.id} aria-current={page===item.id?"page":undefined} onClick={()=>setPage(item.id)}><Icon name={item.icon}/>{item.label}</button>)}<button onClick={()=>void run(companion.openAnalytics)} disabled={busy}><Icon name="chart"/>Analytics <span className="cc-external">↗</span></button></nav>
-      <div className="cc-side-bottom"><span>Infrastructure · I-01</span><button className="cc-quit" onClick={()=>setQuitConfirm(true)}>Quit Oplyra</button></div>
+      <div className="cc-side-bottom"><span>Infrastructure · I-02</span><button className="cc-quit" onClick={()=>setQuitConfirm(true)}>Quit Oplyra</button></div>
     </aside>
     <section className="cc-content">
-      <header className="cc-header"><span className="cc-kicker">YOUR WORKSPACE</span><h1>{nav.find(n=>n.id===page)?.label}</h1><p>{page==="overview"?"A quiet space to manage your companion.":page==="focus"?"Set an intention and control your session.":page==="monitoring"?"See and control what Oplyra observes.":"Application and connection information."}</p></header>
+      <header className="cc-header"><span className="cc-kicker">YOUR WORKSPACE</span><h1>{nav.find(n=>n.id===page)?.label}</h1><p>{page==="overview"?"A quiet space to manage your companion.":page==="focus"?"Set an intention and control your session.":page==="monitoring"?"See and control what Oplyra observes.":page==="desktop"?"Customize your companion’s placement and access.":"Application and connection information."}</p></header>
       {stale&&<p role="alert" className="cc-alert">Live status unavailable. Controls are disabled until refreshed.</p>}
       {error&&<p role="alert" className="cc-alert">{error}</p>}
       {notice&&<p role="status" className="cc-notice">{notice}</p>}
@@ -105,7 +108,12 @@ export function ControlCenter() {
       </>}
       {page==="focus"&&<section className="cc-card">{focusControls}<p className="cc-muted">Sessions completed: {session?.sessions_completed??"—"}</p></section>}
       {page==="monitoring"&&<section className="cc-card"><h2>Current observation</h2>{monitorControls}<div className="cc-divider"/><p className="cc-muted">Screen context: {status?.screen.cloud_context?"Cloud sharing authorized for this session":"Cloud sharing off"}. No observation is started by opening this window.</p></section>}
-      {page==="about"&&<section className="cc-card"><h2>Oplyra · v0.14.3</h2><p>Infrastructure milestone I-01. Native controls are independent of AI.</p><div className="cc-divider"/><div className="cc-line"><strong>AI transport</strong><span>{providerLabel}</span></div><p className="cc-muted">This is the configured provider, not a live connectivity test. No credentials are shown or requested here.</p><div className="cc-divider"/><p>Settings, shortcuts, permissions and connection diagnostics are planned for later milestones.</p></section>}
+      {page==="desktop"&&<>
+        <section className="cc-card"><h2>Conversation window</h2><p>Choose an expanded chat size. The folded character stays compact.</p><div className="cc-size-options" role="group" aria-label="Conversation size">{(["compact","comfortable","large"] as ChatSize[]).map(size=><button key={size} className="cc-secondary" aria-pressed={desktop?.chat_size===size} disabled={disabled||!desktop} onClick={()=>void run(()=>companion.desktopUpdate(size))}>{size==="compact"?"Compact":size==="comfortable"?"Comfortable":"Large"}</button>)}</div></section>
+        <section className="cc-card"><h2>Desktop placement</h2><label className="cc-toggle-line"><span><strong>Always on top</strong><small>Keep the character above other windows.</small></span><input type="checkbox" checked={desktop?.always_on_top??false} disabled={disabled||!desktop} onChange={e=>void run(()=>companion.desktopUpdate(undefined,e.target.checked))}/></label><div className="cc-divider"/><div className="cc-line"><div><strong>Reset companion position</strong><p>Return Oplyra to the center of the primary display.</p></div><button className="cc-secondary" disabled={disabled} onClick={()=>void run(companion.desktopReset)}>Reset position</button></div><p className="cc-muted">Position, chat size and stacking preference are stored locally.</p></section>
+        <section className="cc-card"><h2>Global shortcuts</h2><p>Available while Oplyra is running, even outside its windows.</p>{desktop?.shortcuts.map(s=><div className="cc-shortcut" key={s.keys}><span>{s.label}</span><kbd>{s.keys.replace("Alt+Shift+","⌥ ⇧ ")}</kbd><small>{s.registered?"Registered":"Unavailable"}</small></div>)}<div className="cc-shortcut"><span>Fold conversation</span><kbd>Esc</kbd><small>In chat</small></div><p className="cc-muted">If another application reserves a shortcut, use the menu bar. Custom shortcuts are planned later.</p></section>
+      </>}
+      {page==="about"&&<section className="cc-card"><h2>Oplyra · v0.14.4</h2><p>Infrastructure milestone I-02. Native controls are independent of AI.</p><div className="cc-divider"/><div className="cc-line"><strong>AI transport</strong><span>{providerLabel}</span></div><p className="cc-muted">This is the configured provider, not a live connectivity test. No credentials are shown or requested here.</p><div className="cc-divider"/><p>Additional preferences, custom shortcut bindings, permissions and connection diagnostics are planned for later milestones.</p></section>}
     </section>
     {quitConfirm&&<div className="cc-modal-backdrop"><section className="cc-modal" role="dialog" aria-modal="true" aria-labelledby="cc-quit-title"><h2 id="cc-quit-title">Quit Oplyra?</h2><p>Closes all Oplyra windows and stops observation. Your saved session is retained.</p><div className="cc-actions"><button autoFocus className="cc-secondary" onClick={()=>setQuitConfirm(false)}>Cancel</button><button className="cc-primary" onClick={()=>{setQuitConfirm(false);void run(companion.controlQuit);}}>Quit</button></div></section></div>}
   </main>;

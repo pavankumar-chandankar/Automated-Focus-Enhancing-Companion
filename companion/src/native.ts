@@ -34,7 +34,16 @@ export type AnalyticsSnapshot = { goal: string; elapsed_ms: number; phase: Phase
 export type ControlAction = "start" | "pause" | "resume" | "finish" | "stop_monitoring";
 export type ControlStatus = { session: SessionSnapshot; screen: ScreenStatus; awareness: AwarenessStatus; visible: boolean; provider: Provider | null; gateway: boolean };
 
+export type ChatSize = "compact" | "comfortable" | "large";
+export type DesktopStatus = { chat_size: ChatSize; always_on_top: boolean; shortcuts: {label:string;keys:string;registered:boolean}[] };
+
 export const companion = {
+  desktopStatus: () => invoke<DesktopStatus>("desktop_status"),
+  desktopLayout: (expanded:boolean,remember=false) => invoke<void>("desktop_layout",{expanded,remember}),
+  desktopUpdate: (chatSize?:ChatSize,alwaysOnTop?:boolean) => invoke<void>("desktop_update",{chatSize:chatSize??null,alwaysOnTop:alwaysOnTop??null}),
+  desktopReset: () => invoke<void>("desktop_reset"),
+  desktopCursor: () => invoke<[number,number]>("desktop_cursor"),
+  desktopTakeChat: () => invoke<boolean>("desktop_take_chat"),
   openControlCenter: () => invoke<void>("open_control_center"),
   controlStatus: () => invoke<ControlStatus>("control_status"),
   controlAction: (action: ControlAction, goal?: string, nextStep?: string) =>

@@ -3,7 +3,7 @@ import { AnalyticsWindow } from "./Analytics";
 import { ControlCenter } from "./ControlCenter";
 import { Character } from "./Character";
 import { usePresence } from "./usePresence";
-import { getCurrentWindow, currentMonitor, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
+import { getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { companion, type SessionSnapshot, type PreviousTurn, type Provider, type AwarenessStatus, type AwarenessCue, type ScreenStatus, type ScreenPreview } from "./native";
@@ -11,8 +11,6 @@ import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQu
 
 // Logical pixels. The visible native surface shrinks to the character when closed;
 // it is never a conventional full-window application.
-const COMPACT = new LogicalSize(192, 210);
-const OPEN = new LogicalSize(342, 420);
 const appWindow = getCurrentWindow();
 // A click remains a click; moving the pointer at least 4px while pressed
 // begins dragging immediately, with no long-press timer.
@@ -52,6 +50,9 @@ function CompanionApp() {
   const [ready, setReady] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [resizing, setResizing] = useState(false);
+  const layoutLock = useRef(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const shortcutHandler = useRef<() => Promise<void>>(async()=>{});
   const [dragging, setDragging] = useState(false);
   const held = useRef<DragGesture | null>(null);
   const pendingPosition = useRef<PhysicalPosition | null>(null);
@@ -356,7 +357,8 @@ function CompanionApp() {
   }, []);
 
   async function toggleDetails(open: boolean) {
-    if (resizing) return;
+    if (layoutLock.current || held.current || finishingDrag.current || hiding.current) return;
+    layoutLock.current = true;
     setResizing(true);
     if (!open) {
       visibilityEpoch.current += 1;
@@ -374,19 +376,7 @@ function CompanionApp() {
     try {
       if (open) await companion.setMonitorFolded(false);
       // The hit-test region grows only when the user explicitly opens controls.
-      if (open) {
-        const monitor = await currentMonitor();
-        if (monitor) {
-          const area = monitor.workArea;
-          const scale = monitor.scaleFactor;
-          const size = new LogicalSize(Math.min(OPEN.width, Math.floor(area.size.width / scale)), Math.min(OPEN.height, Math.floor(area.size.height / scale)));
-          const pos = await appWindow.outerPosition();
-          const x = Math.max(area.position.x, Math.min(pos.x, area.position.x + area.size.width - Math.ceil(size.width * scale)));
-          const y = Math.max(area.position.y, Math.min(pos.y, area.position.y + area.size.height - Math.ceil(size.height * scale)));
-          await appWindow.setSize(size);
-          await appWindow.setPosition(new PhysicalPosition(Math.round(x), Math.round(y)));
-        } else await appWindow.setSize(OPEN);
-      } else await appWindow.setSize(COMPACT);
+      await companion.desktopLayout(open, true);
       expandedRef.current = open;
       visibilityEpoch.current += 1;
       setExpanded(open);
@@ -400,8 +390,40 @@ function CompanionApp() {
         setCheckIn(null);
       }
     } catch (failure) { setError(`Could not resize companion: ${String(failure)}`); }
-    finally { setResizing(false); }
+    finally { layoutLock.current = false; setResizing(false); }
   }
+
+  shortcutHandler.current=async()=>{
+    if(!ready || hiding.current || layoutLock.current || held.current || finishingDrag.current)return;
+    if(!await companion.desktopTakeChat())return;
+    if(!expandedRef.current)await toggleDetails(true);
+    if(expandedRef.current){
+      await companion.panelKeyboard(true);
+      requestAnimationFrame(()=>inputRef.current?.focus());
+    }
+  };
+  useEffect(()=>{
+    if(!ready)return;
+    let disposed=false,cleanup:(()=>void)|undefined;
+    const check=()=>{if(!disposed)void shortcutHandler.current().catch(e=>setError(String(e)));};
+    void appWindow.listen("oplyra-open-chat",check).then(fn=>{if(disposed)fn();else{cleanup=fn;check();}}).catch(()=>{});
+    // A native restore can race the new webview listener. The pending flag
+    // remains until the ready webview consumes it.
+    const timer=window.setInterval(check,750);
+    return()=>{disposed=true;cleanup?.();window.clearInterval(timer);};
+  },[ready]);
+  useEffect(()=>{
+    if(!ready)return;
+    let inFlight=false;
+    const check=async()=>{
+      if(inFlight||layoutLock.current||held.current||finishingDrag.current||hiding.current||document.hidden)return;
+      inFlight=true;
+      try{await companion.desktopLayout(expandedRef.current,false);}catch{/* explicit reset remains available */}
+      finally{inFlight=false;}
+    };
+    const timer=window.setInterval(()=>void check(),4000);
+    return()=>window.clearInterval(timer);
+  },[ready]);
 
   async function flushPosition() {
     if (movingPosition.current) return;
@@ -411,7 +433,8 @@ function CompanionApp() {
       while (pendingPosition.current) {
         const next = pendingPosition.current;
         pendingPosition.current = null;
-        await appWindow.setPosition(next);
+        const [x,y]=await companion.desktopCursor();
+        await appWindow.setPosition(new PhysicalPosition(Math.round(x-next.x),Math.round(y-next.y)));
       }
     } catch (failure) {
       setError(`Could not move Oplyra: ${String(failure)}`);
@@ -422,10 +445,9 @@ function CompanionApp() {
 
   function updateDragPosition(gesture: DragGesture) {
     if (!gesture.started || !gesture.base || gesture.ended) return;
-    pendingPosition.current = new PhysicalPosition(
-      Math.round(gesture.base.x + (gesture.latestX - gesture.downX) * gesture.scale),
-      Math.round(gesture.base.y + (gesture.latestY - gesture.downY) * gesture.scale),
-    );
+    // base is the physical cursor-to-window offset captured at press.
+    // Read native cursor coordinates across monitor/DPI boundaries.
+    pendingPosition.current = gesture.base;
     void flushPosition();
   }
 
@@ -479,9 +501,10 @@ function CompanionApp() {
     };
     held.current = gesture;
     // Warm up native geometry immediately rather than waiting for drag start.
-    gesture.geometryPromise = Promise.all([appWindow.outerPosition(), appWindow.scaleFactor()])
-      .then(([base, scale]) => {
-        gesture.base = base;
+    const localX=event.clientX, localY=event.clientY;
+    gesture.geometryPromise = appWindow.scaleFactor()
+      .then(scale => {
+        gesture.base = new PhysicalPosition(Math.round(localX*scale),Math.round(localY*scale));
         gesture.scale = scale;
         if (gesture.started && !gesture.ended) updateDragPosition(gesture);
       })
@@ -542,6 +565,7 @@ function CompanionApp() {
           if (cancelled) await invoke("cancel_companion_drag");
           else if (await invoke<boolean>("finish_companion_drag")) await hideOverlay();
         }
+        if(!hiding.current) await companion.desktopLayout(expandedRef.current,true);
       } catch (failure) {
         setError(`Could not complete drag: ${String(failure)}`);
       } finally {
@@ -834,7 +858,7 @@ function CompanionApp() {
           {screen?.active && <div className="screen-diagnostics"><p className="screen-detail">{screen.detail || "Waiting for work app"}</p>{screen.analysis_detail && <p className="screen-detail">{screen.analysis_detail}</p>}{screen.cloud_context && usedScreenContext && <p className="screen-detail">Last reply used fresh screen text.</p>}</div>}
           </div>
           <form className="conversation-form" onSubmit={(event) => { event.preventDefault(); void sendMessage(); }}>
-            <input aria-label="Type to Oplyra" value={message} maxLength={300}
+            <input ref={inputRef} aria-label="Type to Oplyra" value={message} maxLength={300}
               placeholder={pendingAction.current || awarenessPending.current !== null ? "Yes or no…" : "Say something…"} disabled={!ready || !current || busy}
               onPointerDown={() => { void companion.panelKeyboard(true).catch(() => {}); }}
               onChange={(event) => setMessage(event.target.value)} />
