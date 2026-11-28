@@ -4,7 +4,8 @@
   "description": "Transparent, user-controlled character; pointer-movement native position changes and Rust-owned drop target",
   "windows": [
     "main",
-    "analytics"
+    "analytics",
+    "control-center"
   ],
   "permissions": [
     "core:default",

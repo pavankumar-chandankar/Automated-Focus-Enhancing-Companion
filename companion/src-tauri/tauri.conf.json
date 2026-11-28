@@ -66,6 +66,24 @@
         "maximizable": true,
         "alwaysOnTop": false,
         "focus": true
+      },
+      {
+        "label": "control-center",
+        "title": "Oplyra — Control Center",
+        "url": "index.html#control-center",
+        "width": 900,
+        "height": 650,
+        "minWidth": 660,
+        "minHeight": 460,
+        "center": true,
+        "create": false,
+        "visible": true,
+        "decorations": true,
+        "transparent": false,
+        "resizable": true,
+        "maximizable": true,
+        "alwaysOnTop": false,
+        "focus": true
       }
     ],
     "security": {

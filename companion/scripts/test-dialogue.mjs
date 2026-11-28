@@ -171,3 +171,13 @@ assert.equal(focusDeclaration("I'm not focusing on anything"),null);
 assert.equal(focusDeclaration("I am focusing on this?"),null);
 assert.equal(focusDeclaration("I am exhausted"),null);
 console.log("Concrete focus declaration routing assertions passed.");
+
+const controlSource = await readFile(new URL("../src/controlLogic.ts", import.meta.url), "utf8");
+const {outputText:controlJs}=ts.transpileModule(controlSource,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}});
+const {sessionActions,elapsedLabel}=await import("data:text/javascript;base64,"+Buffer.from(controlJs).toString("base64"));
+assert.deepEqual(sessionActions("idle"),["start"]);
+assert.deepEqual(sessionActions("running"),["pause","finish"]);
+assert.deepEqual(sessionActions("paused"),["resume","finish"]);
+assert.equal(elapsedLabel(3661999),"01:01:01");
+assert.equal(elapsedLabel(-1),"00:00:00");
+console.log("Control Center phase and elapsed time tests passed");

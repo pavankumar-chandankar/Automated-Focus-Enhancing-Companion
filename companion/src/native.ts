@@ -31,7 +31,16 @@ export type ScreenPreview = { id: number; excerpt: string; goal: string; remaini
 
 export type AnalyticsSnapshot = { goal: string; elapsed_ms: number; phase: Phase; active: boolean; monitoring: boolean; remaining_today: number; detail: string; metrics: { samples: number; related: number; possible_distraction: number; unknown: number; changes: number; analyses: number; check_ins: number; returns: number } };
 
+export type ControlAction = "start" | "pause" | "resume" | "finish" | "stop_monitoring";
+export type ControlStatus = { session: SessionSnapshot; screen: ScreenStatus; awareness: AwarenessStatus; visible: boolean; provider: Provider | null; gateway: boolean };
+
 export const companion = {
+  openControlCenter: () => invoke<void>("open_control_center"),
+  controlStatus: () => invoke<ControlStatus>("control_status"),
+  controlAction: (action: ControlAction, goal?: string, nextStep?: string) =>
+    invoke<SessionSnapshot>("control_action", { action, goal: goal ?? null, nextStep: nextStep ?? null }),
+  controlVisibility: (visible: boolean) => invoke<void>("control_visibility", { visible }),
+  controlQuit: () => invoke<void>("control_quit"),
   startFollowScreen: (cloud: boolean, goal: string, switchWatch = false) => invoke<ScreenStatus>("start_follow_screen", { cloud, goal, switchWatch }),
   dismissFocusCue: () => invoke<void>("dismiss_focus_cue"),
   setMonitorFolded: (folded: boolean) => invoke<void>("set_monitor_folded", { folded }),

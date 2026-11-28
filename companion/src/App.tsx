@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { AnalyticsWindow } from "./Analytics";
+import { ControlCenter } from "./ControlCenter";
 import { Character } from "./Character";
 import { usePresence } from "./usePresence";
 import { getCurrentWindow, currentMonitor, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
@@ -105,6 +106,28 @@ function CompanionApp() {
       if (active) setCurrent(data);
     }).catch((e: unknown) => { if (active) setError(String(e)); });
     return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void appWindow.listen<SessionSnapshot>("oplyra-control-changed", ({payload}) => {
+      if (disposed || hiding.current) return;
+      // Invalidate pending proposals and stale responses from before a direct
+      // external control action. Preserve drafts and completed chat history.
+      visibilityEpoch.current += 1;
+      pendingAction.current = null;
+      awarenessPending.current = null;
+      screenEpoch.current += 1;
+      awarenessEpoch.current += 1;
+      clearScreenPanel();
+      setCurrent(payload);
+      if (payload.phase !== "running") { clearScreen(); clearAwareness(); }
+      setReply(payload.phase === "running" ? "Ready when you are." : payload.phase === "paused" ? "Take your time." : "Ready for your next session.");
+      setSource("command");
+      setLatency(null);
+    }).then(unlisten => { if (disposed) unlisten(); else cleanup = unlisten; }).catch(() => {});
+    return () => { disposed = true; cleanup?.(); };
   }, []);
 
   useEffect(() => {
@@ -785,7 +808,7 @@ function CompanionApp() {
 
       {expanded && (
         <section id="companion-controls" className="conversation-bubble" aria-label="Talk to Oplyra">
-          <div className="conversation-heading"><strong>Oplyra</strong><div className="heading-actions"><button type="button" onClick={() => void companion.openAnalytics().catch(e => setError(String(e)))} aria-label="Open separate analytics window" title="Analytics">↗</button><button type="button" onClick={() => void toggleDetails(false)} aria-label="Fold conversation">−</button></div></div>
+          <div className="conversation-heading"><strong>Oplyra</strong><div className="heading-actions"><button type="button" onClick={() => void companion.openControlCenter().catch(e => setError(String(e)))} aria-label="Open Control Center" title="Control Center">⚙</button><button type="button" onClick={() => void companion.openAnalytics().catch(e => setError(String(e)))} aria-label="Open separate analytics window" title="Analytics">↗</button><button type="button" onClick={() => void toggleDetails(false)} aria-label="Fold conversation">−</button></div></div>
           <div ref={replyArea} className="conversation-content">
           <p className="companion-reply" role="status" aria-live="polite">
             {reply || (phase === "running" ? "How's it going?" : phase === "paused" ? "Ready when you are." : "Let's spend some time together.")}
@@ -829,5 +852,5 @@ function CompanionApp() {
 }
 
 export default function App() {
-  return window.location.hash === "#analytics" ? <AnalyticsWindow /> : window.location.hash === "#drop-zone" ? <DropTarget /> : <CompanionApp />;
+  return window.location.hash === "#control-center" ? <ControlCenter /> : window.location.hash === "#analytics" ? <AnalyticsWindow /> : window.location.hash === "#drop-zone" ? <DropTarget /> : <CompanionApp />;
 }

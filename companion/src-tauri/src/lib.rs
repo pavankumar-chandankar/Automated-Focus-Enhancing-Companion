@@ -10,7 +10,7 @@ use policy::{Feedback, SupportMode};
 
 use std::{fs, path::PathBuf, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
 use model::{SessionModel, SessionSnapshot};
-use tauri::{Manager, PhysicalPosition, State, WindowEvent, menu::{Menu, MenuItem}, tray::TrayIconBuilder};
+use tauri::{Emitter, Manager, PhysicalPosition, State, WindowEvent, menu::{Menu, MenuItem}, tray::TrayIconBuilder};
 
 struct SessionStore {
     path: PathBuf,
@@ -205,6 +205,87 @@ async fn open_analytics(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// The ordinary control window uses the same native session state as the buddy.
+// No inference, permission acquisition or new monitoring occurs here.
+#[tauri::command]
+async fn open_control_center(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("control-center") {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    let config = app.config().app.windows.iter().find(|w| w.label == "control-center")
+        .ok_or("Control Center config missing")?;
+    tauri::WebviewWindowBuilder::from_config(&app, config).map_err(|e| e.to_string())?
+        .build().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct ControlStatus {
+    session: SessionSnapshot,
+    screen: screen::ScreenStatus,
+    awareness: awareness::AwarenessStatus,
+    visible: bool,
+    provider: Option<intelligence::Provider>,
+    gateway: bool,
+}
+
+#[tauri::command]
+fn control_status(app: tauri::AppHandle, store: State<'_, SessionStore>,
+    screen_state: State<'_, screen::ScreenState>, awareness_state: State<'_, awareness::AwarenessState>
+) -> Result<ControlStatus, String> {
+    Ok(ControlStatus {
+        session: store.snapshot()?,
+        screen: screen::screen_status(screen_state)?,
+        awareness: awareness::awareness_status(awareness_state)?,
+        visible: match app.get_webview_window("main") {
+            Some(w) => w.is_visible().map_err(|e| e.to_string())?,
+            None => false,
+        },
+        provider: intelligence::configured_provider().ok(),
+        gateway: std::env::var("OPLYRA_GROQ_TRANSPORT").as_deref() == Ok("gateway"),
+    })
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ControlAction { Start, Pause, Resume, Finish, StopMonitoring }
+
+#[tauri::command]
+fn control_action(app: tauri::AppHandle, store: State<'_, SessionStore>,
+    action: ControlAction, goal: Option<String>, next_step: Option<String>) -> Result<SessionSnapshot, String> {
+    let result = match action {
+        ControlAction::Start => start_session(app.clone(), store, goal.unwrap_or_default(),
+            next_step.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "Continue the chosen task".into())),
+        ControlAction::Pause => pause_session(app.clone(), store),
+        ControlAction::Resume => resume_session(store),
+        ControlAction::Finish => finish_session(app.clone(), store),
+        ControlAction::StopMonitoring => {
+            awareness::stop(&app);
+            store.snapshot()
+        }
+    }?;
+    // Only the external controls emit this event; the buddy's own actions
+    // retain their existing response/animation lifecycle.
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.emit("oplyra-control-changed", &result);
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn control_visibility(app: tauri::AppHandle, visible: bool) {
+    if visible { overlay::request_show(app); }
+    else { overlay::request_hide(&app); }
+}
+
+#[tauri::command]
+fn control_quit(app: tauri::AppHandle) {
+    awareness::stop(&app);
+    app.exit(0);
+}
+
 pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
@@ -232,10 +313,11 @@ pub fn run() {
             let hide = MenuItem::with_id(app, "hide", "Hide Oplyra", true, None::<&str>)?;
             let stop_awareness = MenuItem::with_id(app, "stop-awareness", "Stop activity awareness", true, None::<&str>)?;
             let stop_screen = MenuItem::with_id(app, "stop-screen", "Stop screen observation", true, None::<&str>)?;
+            let control = MenuItem::with_id(app, "control-center", "Open Control Center", true, None::<&str>)?;
             let analytics = MenuItem::with_id(app, "analytics", "Open analytics", true, None::<&str>)?;
             let test_cue = MenuItem::with_id(app, "test-cue", "Test reminder bubble", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &hide, &analytics, &test_cue, &stop_awareness, &stop_screen, &quit])?;
+            let menu = Menu::with_items(app, &[&control, &show, &hide, &analytics, &test_cue, &stop_awareness, &stop_screen, &quit])?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("app icon").clone())
                 .tooltip("Oplyra")
@@ -247,6 +329,7 @@ pub fn run() {
                     "stop-awareness" => awareness::stop(app),
                     "stop-screen" => screen::stop(app),
                     "test-cue" => screen::test_cue(app),
+                    "control-center" => { let handle = app.clone(); tauri::async_runtime::spawn(async move { if let Err(e) = open_control_center(handle).await { eprintln!("Control Center: {e}"); } }); },
                     "analytics" => { let handle = app.clone(); tauri::async_runtime::spawn(async move { let _ = open_analytics(handle).await; }); },
                     "quit" => app.exit(0),
                     _ => {}
@@ -271,7 +354,8 @@ pub fn run() {
             awareness::set_awareness, awareness::awareness_status, awareness::sample_awareness, awareness::suspend_awareness,
             screen::screen_status, screen::request_screen_permission, screen::start_follow_screen, screen::list_screen_windows,
             screen::select_screen_window, screen::sample_screen, screen::stop_screen,
-            screen::preview_screen, screen::analyze_screen, screen::get_analytics, screen::dismiss_focus_cue, screen::set_monitor_folded, open_analytics
+            screen::preview_screen, screen::analyze_screen, screen::get_analytics, screen::dismiss_focus_cue, screen::set_monitor_folded, open_analytics,
+            open_control_center, control_status, control_action, control_visibility, control_quit
         ])
         .build(tauri::generate_context!())
         .expect("error while building Oplyra desktop")
