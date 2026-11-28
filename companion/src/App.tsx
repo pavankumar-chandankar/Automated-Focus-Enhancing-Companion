@@ -150,11 +150,13 @@ function CompanionApp() {
   }
 
   function clearScreen() {
+    if (ambientTimer.current !== null) { window.clearTimeout(ambientTimer.current); ambientTimer.current = null; }
+    setNativeCue(false);
     setUsedScreenContext(false);
     screenActive.current = false;
     setAmbientCue("");
     clearScreenPanel();
-    setScreen(old => old ? {...old, active: false, app: null, sample_ready: false, cloud_context: false, monitoring: false, relevance: "unknown"} : null);
+    setScreen(old => old ? {...old, active: false, app: null, sample_ready: false, cloud_context: false, monitoring: false, tab_reminders: false, reference_set: false, cue: false, detail: "", analysis_detail: "", relevance: "unknown"} : null);
   }
 
   useEffect(() => {
@@ -162,6 +164,30 @@ function CompanionApp() {
     let cleanup: (() => void) | undefined;
     void appWindow.listen("oplyra-screen-stopped", () => { if (!disposed) clearScreen(); })
       .then(unlisten => { if (disposed) unlisten(); else cleanup = unlisten; }).catch(() => {});
+    return () => { disposed = true; cleanup?.(); };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void appWindow.listen<SessionSnapshot>("oplyra-observation-stopped", ({payload}) => {
+      if (disposed || hiding.current) return;
+      visibilityEpoch.current += 1;
+      pendingAction.current = null;
+      clearScreen();
+      clearAwareness();
+      setCurrent(payload);
+      setReply("Monitoring is off. Your focus session is unchanged.");
+      setSource("command");
+      setLatency(null);
+      setNativeCue(false);
+      if (!expandedRef.current) {
+        setAmbientCue("Monitoring stopped");
+        ambientTimer.current = window.setTimeout(() => {
+          setAmbientCue(""); ambientTimer.current = null;
+        }, 4000);
+      }
+    }).then(unlisten => { if (disposed) unlisten(); else cleanup = unlisten; }).catch(() => {});
     return () => { disposed = true; cleanup?.(); };
   }, []);
 
@@ -191,7 +217,7 @@ function CompanionApp() {
       });
       if (disposed) { second(); return; } cleanups.push(second);
       const third = await appWindow.listen<[string, boolean]>("oplyra-focus-cue", ({payload}) => {
-        if (!disposed && !hiding.current) showAmbient(payload[0], payload[1]);
+        if (!disposed && !hiding.current && (screenActive.current || payload[0] === "Hi! Your reminder bubble works.")) showAmbient(payload[0], payload[1]);
       });
       if (disposed) third(); else cleanups.push(third);
     };

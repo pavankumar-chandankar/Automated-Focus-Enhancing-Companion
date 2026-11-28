@@ -253,6 +253,22 @@ fn control_status(app: tauri::AppHandle, store: State<'_, SessionStore>,
 #[serde(rename_all = "snake_case")]
 enum ControlAction { Start, Pause, Resume, Finish, StopMonitoring }
 
+// One explicit stop path for the Control Center, menu and global hotkey.
+fn stop_observation(app: &tauri::AppHandle) -> Result<SessionSnapshot, String> {
+    awareness::stop(app);
+    let screen = app.state::<screen::ScreenState>();
+    let activity = awareness::awareness_status(app.state::<awareness::AwarenessState>())?;
+    if screen::observation_active(&screen) || activity.enabled {
+        return Err("Observation did not stop; retry from Control Center".into());
+    }
+    let snapshot = app.state::<SessionStore>().snapshot()?;
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.emit("oplyra-observation-stopped", &snapshot);
+    }
+    eprintln!("[Oplyra] observation stopped; focus session unchanged");
+    Ok(snapshot)
+}
+
 #[tauri::command]
 fn control_action(app: tauri::AppHandle, store: State<'_, SessionStore>,
     action: ControlAction, goal: Option<String>, next_step: Option<String>) -> Result<SessionSnapshot, String> {
@@ -262,10 +278,7 @@ fn control_action(app: tauri::AppHandle, store: State<'_, SessionStore>,
         ControlAction::Pause => pause_session(app.clone(), store),
         ControlAction::Resume => resume_session(store),
         ControlAction::Finish => finish_session(app.clone(), store),
-        ControlAction::StopMonitoring => {
-            awareness::stop(&app);
-            store.snapshot()
-        }
+        ControlAction::StopMonitoring => return stop_observation(&app),
     }?;
     // Only the external controls emit this event; the buddy's own actions
     // retain their existing response/animation lifecycle.
@@ -318,7 +331,7 @@ pub fn run() {
             screen::start_worker(app.handle().clone());
             let show = MenuItem::with_id(app, "show", "Show Oplyra", true, None::<&str>)?;
             let hide = MenuItem::with_id(app, "hide", "Hide Oplyra", true, None::<&str>)?;
-            let stop_awareness = MenuItem::with_id(app, "stop-awareness", "Stop activity awareness", true, None::<&str>)?;
+            let stop_awareness = MenuItem::with_id(app, "stop-awareness", "Stop all monitoring", true, None::<&str>)?;
             let stop_screen = MenuItem::with_id(app, "stop-screen", "Stop screen observation", true, None::<&str>)?;
             let control = MenuItem::with_id(app, "control-center", "Open Control Center", true, None::<&str>)?;
             let chat = MenuItem::with_id(app, "open-chat", "Open conversation", true, None::<&str>)?;
@@ -337,7 +350,7 @@ pub fn run() {
                     "reset-position" => { if let Err(e) = desktop::desktop_reset(app.clone(), app.state::<desktop::DesktopState>()) { eprintln!("Reset position: {e}"); } },
                     "show" => overlay::request_show(app.clone()),
                     "hide" => overlay::request_hide(app),
-                    "stop-awareness" => awareness::stop(app),
+                    "stop-awareness" => { if let Err(e) = stop_observation(app) { eprintln!("[Oplyra] stop monitoring: {e}"); } },
                     "stop-screen" => screen::stop(app),
                     "test-cue" => screen::test_cue(app),
                     "control-center" => { let handle = app.clone(); tauri::async_runtime::spawn(async move { if let Err(e) = open_control_center(handle).await { eprintln!("Control Center: {e}"); } }); },

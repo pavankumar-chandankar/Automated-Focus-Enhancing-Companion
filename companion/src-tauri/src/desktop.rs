@@ -1,5 +1,5 @@
 //! I-02: local desktop geometry and explicitly registered global hotkeys.
-use std::{fs, path::PathBuf, sync::{Mutex, atomic::{AtomicBool, Ordering}}};
+use std::{fs, path::PathBuf, sync::{Mutex, atomic::{AtomicBool, AtomicU32, Ordering}}};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, LogicalSize, PhysicalPosition, State, WebviewWindow};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -30,16 +30,17 @@ pub struct DesktopState {
     expanded: AtomicBool,
     chat_requested: AtomicBool,
     shortcuts: Mutex<Vec<ShortcutInfo>>,
+    stop_shortcut_count: AtomicU32,
 }
 #[derive(Clone, Serialize)]
 pub struct ShortcutInfo { pub label: &'static str, pub keys: &'static str, pub registered: bool }
 #[derive(Serialize)]
-pub struct DesktopStatus { pub chat_size: ChatSize, pub always_on_top: bool, pub shortcuts: Vec<ShortcutInfo> }
+pub struct DesktopStatus { pub chat_size: ChatSize, pub always_on_top: bool, pub shortcuts: Vec<ShortcutInfo>, pub stop_shortcut_count: u32 }
 impl DesktopState {
     pub fn new(path: PathBuf) -> Self {
         let prefs = fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         Self { path, prefs: Mutex::new(prefs), expanded: AtomicBool::new(false),
-            chat_requested: AtomicBool::new(false), shortcuts: Mutex::new(Vec::new()) }
+            chat_requested: AtomicBool::new(false), shortcuts: Mutex::new(Vec::new()), stop_shortcut_count: AtomicU32::new(0) }
     }
     fn prefs(&self) -> Result<DesktopPrefs,String> {
         Ok(self.prefs.lock().map_err(|_| "Desktop preferences unavailable")?.clone())
@@ -121,7 +122,7 @@ pub fn restore(window:&WebviewWindow)->Result<(),String> {
 pub fn desktop_status(state:State<'_,DesktopState>)->Result<DesktopStatus,String> {
     let prefs=state.prefs()?;
     Ok(DesktopStatus{chat_size:prefs.chat_size,always_on_top:prefs.always_on_top,
-        shortcuts:state.shortcuts.lock().map_err(|_|"Shortcut status unavailable")?.clone()})
+        shortcuts:state.shortcuts.lock().map_err(|_|"Shortcut status unavailable")?.clone(), stop_shortcut_count:state.stop_shortcut_count.load(Ordering::Acquire)})
 }
 #[tauri::command]
 pub fn desktop_layout(app:AppHandle,state:State<'_,DesktopState>,expanded:bool,remember:bool)->Result<(),String> {
@@ -172,31 +173,56 @@ pub fn request_chat(app:&AppHandle) {
 pub fn clear_chat(app:&AppHandle) {
     if let Some(state)=app.try_state::<DesktopState>(){state.chat_requested.store(false,Ordering::Release);}
 }
+// Stop on press (not release) for prompt revocation. Other shortcuts retain
+// their tested release behavior. A registration failure is visible and has
+// a fallback binding, rather than silently pretending the key is active.
+fn shortcut_trigger(index:usize, state:ShortcutState)->bool {
+    if index==3 {state==ShortcutState::Pressed} else {state==ShortcutState::Released}
+}
+fn bind_shortcut(app:&AppHandle,index:usize,keys:&'static str)->bool {
+    match app.global_shortcut().on_shortcut(keys,move|handle,_,event|{
+        if !shortcut_trigger(index,event.state) {return;}
+        let app=handle.clone();
+        let _=handle.run_on_main_thread(move||match index{
+            0=>{if app.get_webview_window("main").and_then(|w|w.is_visible().ok()).unwrap_or(false){
+                clear_chat(&app);crate::overlay::request_hide(&app);
+            }else{crate::overlay::request_show(app.clone());}},
+            1=>request_chat(&app),
+            2=>{let handle=app.clone();tauri::async_runtime::spawn(async move{let _=crate::open_control_center(handle).await;});},
+            3=>{
+                app.state::<DesktopState>().stop_shortcut_count.fetch_add(1,Ordering::AcqRel);
+                eprintln!("[Oplyra] stop monitoring shortcut received");
+                if let Err(e)=crate::stop_observation(&app){eprintln!("[Oplyra] stop monitoring failed: {e}");}
+            },
+            _=>{}
+        });
+    }){
+        Ok(())=>true,
+        Err(e)=>{eprintln!("[Oplyra] shortcut {keys} unavailable: {e}");false}
+    }
+}
 pub fn register_shortcuts(app:&AppHandle) {
     let shortcuts=[("Show / hide Oplyra","Alt+Shift+O"),("Open conversation","Alt+Shift+C"),
         ("Open Control Center","Alt+Shift+S"),("Stop monitoring","Alt+Shift+M")];
     let mut status=Vec::new();
     for (index,(label,keys)) in shortcuts.into_iter().enumerate(){
-        let registered=app.global_shortcut().on_shortcut(keys,move|handle,_,event|{
-            if event.state != ShortcutState::Released {return;}
-            let app=handle.clone();
-            let _=handle.run_on_main_thread(move||match index{
-                0=>{if app.get_webview_window("main").and_then(|w|w.is_visible().ok()).unwrap_or(false){
-                    clear_chat(&app);crate::overlay::request_hide(&app);
-                }else{crate::overlay::request_show(app.clone());}},
-                1=>request_chat(&app),
-                2=>{let handle=app.clone();tauri::async_runtime::spawn(async move{let _=crate::open_control_center(handle).await;});},
-                3=>crate::awareness::stop(&app),
-                _=>{}
-            });
-        }).is_ok();
+        let registered=bind_shortcut(app,index,keys);
         status.push(ShortcutInfo{label,keys,registered});
+        if index==3&&!registered{
+            let fallback="Alt+Shift+X";
+            status.push(ShortcutInfo{label:"Stop monitoring (fallback)",keys:fallback,registered:bind_shortcut(app,index,fallback)});
+        }
     }
     if let Ok(mut current)=app.state::<DesktopState>().shortcuts.lock(){*current=status;}
 }
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]fn stop_hotkey_uses_press_and_other_actions_use_release(){
+        assert!(shortcut_trigger(3,ShortcutState::Pressed));
+        assert!(!shortcut_trigger(3,ShortcutState::Released));
+        for index in 0..3 {assert!(!shortcut_trigger(index,ShortcutState::Pressed));assert!(shortcut_trigger(index,ShortcutState::Released));}
+    }
     #[test]fn negative_coordinate_display_clamps(){
         let a=Rect{x:-1920,y:25,w:1920,h:1000};
         assert_eq!(clamp_position((-2000,1100),(342,420),a),(-1920,605));

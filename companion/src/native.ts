@@ -35,7 +35,7 @@ export type ControlAction = "start" | "pause" | "resume" | "finish" | "stop_moni
 export type ControlStatus = { session: SessionSnapshot; screen: ScreenStatus; awareness: AwarenessStatus; visible: boolean; provider: Provider | null; gateway: boolean };
 
 export type ChatSize = "compact" | "comfortable" | "large";
-export type DesktopStatus = { chat_size: ChatSize; always_on_top: boolean; shortcuts: {label:string;keys:string;registered:boolean}[] };
+export type DesktopStatus = { chat_size: ChatSize; always_on_top: boolean; stop_shortcut_count: number; shortcuts: {label:string;keys:string;registered:boolean}[] };
 
 export const companion = {
   desktopStatus: () => invoke<DesktopStatus>("desktop_status"),
