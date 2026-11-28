@@ -40,3 +40,26 @@ test("quota failure fails closed without upstream",async()=>{
     method:"POST",headers:{authorization:"Bearer "+"a".repeat(64),"content-type":"application/json"},body:JSON.stringify(body)}),env);
   assert.equal(response.status,429);assert.equal(response.headers.get("retry-after"),"30");
 });
+
+test("quota exceptions are distinguishable from upstream exceptions",async()=>{
+  const makeRequest=()=>new Request("https://example.test/v1/chat/completions",{
+    method:"POST",headers:{authorization:"Bearer "+"a".repeat(64),"content-type":"application/json"},body:JSON.stringify(body)});
+  const env={GROQ_API_KEY:"fake-test-only",OPLYRA_CLIENT_TOKEN:"a".repeat(64),
+    QUOTA:{idFromName:()=>1,get:()=>({fetch:async()=>{throw new Error("private diagnostic");}})}};
+  let result=await worker.fetch(makeRequest(),env);
+  assert.equal(result.status,503); assert.deepEqual(await result.json(),{status:"quota_unavailable"});
+  env.QUOTA.get=()=>({fetch:async()=>new Response(null,{status:200})});
+  const original=globalThis.fetch;
+  try {
+    globalThis.fetch=async()=>{throw new Error("private network error")};
+    result=await worker.fetch(makeRequest(),env);
+    assert.equal(result.status,503); assert.deepEqual(await result.json(),{status:"provider_connection"});
+    globalThis.fetch=async()=>new Response("private response",{status:401});
+    result=await worker.fetch(makeRequest(),env);
+    assert.equal(result.status,502); assert.deepEqual(await result.json(),{status:"provider_auth"});
+    globalThis.fetch=async()=>new Response(JSON.stringify({choices:[{finish_reason:"stop",message:{role:"assistant",content:"Hello"}}]}));
+    result=await worker.fetch(makeRequest(),env);
+    assert.equal(result.status,200);
+    assert.equal((await result.json()).choices[0].message.content,"Hello");
+  } finally {globalThis.fetch=original;}
+});

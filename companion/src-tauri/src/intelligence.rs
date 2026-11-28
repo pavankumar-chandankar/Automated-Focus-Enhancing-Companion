@@ -331,7 +331,28 @@ fn send_request_with_slot(provider: Provider, body: &Value, busy: &AtomicBool) -
         return Err("Groq rate limit reached; wait before trying again".into());
     }
     if !response.status().is_success() {
-        return Err(format!("AI provider returned HTTP {}", response.status().as_u16()));
+        let status = response.status().as_u16();
+        if gateway {
+            let mut raw = Vec::new();
+            if response.take(2048).read_to_end(&mut raw).is_ok() {
+                if let Ok(value) = serde_json::from_slice::<Value>(&raw) {
+                    let detail = match value["status"].as_str() {
+                        Some("quota_unavailable") => "gateway quota storage unavailable",
+                        Some("provider_connection") => "gateway could not connect to Groq",
+                        Some("provider_auth") => "Groq rejected server credential",
+                        Some("provider_request") => "Groq rejected model or request",
+                        Some("provider_error") => "Groq upstream error",
+                        Some("provider_response") => "Groq response could not be decoded",
+                        Some("not_configured") => "gateway secrets not configured",
+                        Some("unauthorized") => "gateway token rejected",
+                        Some("invalid_request") => "gateway rejected request format",
+                        _ => "gateway unavailable",
+                    };
+                    return Err(format!("Oplyra: {detail} (HTTP {status})"));
+                }
+            }
+        }
+        return Err(format!("AI provider returned HTTP {status}"));
     }
     let mut bytes = Vec::new();
     response.take(MAX_RESPONSE + 1).read_to_end(&mut bytes).map_err(|_| "Could not read local model response")?;

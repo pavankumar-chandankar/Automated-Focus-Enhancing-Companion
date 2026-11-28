@@ -90,6 +90,7 @@ export class GatewayQuota {
 }
 export default {
   async fetch(request, env) {
+    let stage = "gateway_unavailable";
     try {
       const url = new URL(request.url);
       if (url.pathname !== "/v1/chat/completions" && url.pathname !== "/health") return reply(404,"not_found");
@@ -104,11 +105,13 @@ export default {
       let payload;
       try { payload = normalize(JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(await boundedBody(request.body, MAX_BODY)))); }
       catch { return reply(400,"invalid_request"); }
+      stage = "quota_unavailable";
       const gate = env.QUOTA.get(env.QUOTA.idFromName("founder-global"));
-      const reservation = await gate.fetch("https://quota.internal/reserve",{method:"POST"});
+      const reservation = await gate.fetch(new Request("https://quota.internal/reserve",{method:"POST"}));
       if (!reservation.ok) return reservation.status === 429
         ? reply(429,"quota",{"retry-after":reservation.headers.get("retry-after") || "60"})
         : reply(503,"quota_unavailable");
+      stage = "provider_connection";
       const upstream = await fetch(UPSTREAM,{
         method:"POST", redirect:"error", signal:AbortSignal.timeout(30000),
         headers:{"authorization":"Bearer "+env.GROQ_API_KEY,"content-type":"application/json"},
@@ -116,10 +119,16 @@ export default {
       });
       if (!upstream.ok) {
         const retry = upstream.headers.get("retry-after");
-        await upstream.body?.cancel();
+        const code = upstream.status === 401 || upstream.status === 403 ? "provider_auth" :
+          upstream.status === 400 || upstream.status === 404 || upstream.status === 422 ? "provider_request" :
+          "provider_error";
+        // Never forward upstream error bodies, which may contain private input.
+        try { await upstream.body?.cancel(); } catch {}
+
         return upstream.status === 429 ? reply(429,"provider_quota",{"retry-after":/^\d{1,5}$/.test(retry || "") ? retry : "60"})
-          : reply(502,"provider_error");
+          : reply(502,code);
       }
+      stage = "provider_response";
       const bytes = await boundedBody(upstream.body, MAX_RESPONSE);
       // Return only the fields needed by the existing Rust parser.
       const data = JSON.parse(new TextDecoder().decode(bytes));
@@ -131,6 +140,6 @@ export default {
       return new Response(JSON.stringify({choices:[{finish_reason:choice.finish_reason,
         message:{role:"assistant",content:choice.message.content}}]}),
         {headers:{"content-type":"application/json","cache-control":"no-store"}});
-    } catch { return reply(503,"gateway_unavailable"); }
+    } catch { return reply(stage === "provider_response" ? 502 : 503,stage); }
   }
 };
