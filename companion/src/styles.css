@@ -185,3 +185,17 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .screen-footer { margin: 0; min-height: 21px; }
 .screen-diagnostics { border-top: 1px solid #e8e1f2; padding-top: 4px; }
 .screen-controls label { margin: 3px 0 2px; }
+
+/* I-03: match folded native geometry; preserve the protected conversation row. */
+.is-compact.character-size-small .character-stage{width:172px;height:186px}
+.is-compact.character-size-small .character-button{width:162px;height:145px;margin:9px 5px 0}
+.is-compact.character-size-small .character-status{left:50%;transform:translateX(-50%);max-width:164px}
+.is-compact.character-size-large .character-stage{width:232px;height:246px}
+.is-compact.character-size-large .character-button{width:222px;height:198px;margin:18px 5px 0}
+.is-compact.character-size-large .character-status{left:50%;transform:translateX(-50%);max-width:218px}
+.is-expanded.character-size-small .character-button{width:120px;height:106px;margin:10px 36px 0}
+.is-expanded.character-size-large .character-button{width:156px;height:138px;margin:0 18px}
+.is-expanded.character-size-large .character-stage{height:166px}
+.is-expanded.character-size-large{grid-template-rows:166px minmax(0,1fr)}
+.reduce-motion .living-character,.reduce-motion .living-character *{animation:none!important;transition:none!important}
+.reduce-motion .living-gaze{transform:none!important}

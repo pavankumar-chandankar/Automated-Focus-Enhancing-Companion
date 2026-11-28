@@ -35,9 +35,15 @@ export type ControlAction = "start" | "pause" | "resume" | "finish" | "stop_moni
 export type ControlStatus = { session: SessionSnapshot; screen: ScreenStatus; awareness: AwarenessStatus; visible: boolean; provider: Provider | null; gateway: boolean };
 
 export type ChatSize = "compact" | "comfortable" | "large";
-export type DesktopStatus = { chat_size: ChatSize; always_on_top: boolean; stop_shortcut_count: number; shortcuts: {label:string;keys:string;registered:boolean}[] };
+export type CharacterSize = "small" | "standard" | "large";
+export type CharacterColor = "lavender" | "mint" | "peach" | "sky";
+export type Appearance = {size:CharacterSize;color:CharacterColor;reduce_motion:boolean};
+export const defaultAppearance:Appearance = {size:"standard",color:"lavender",reduce_motion:false};
+export type DesktopStatus = { appearance:Appearance; chat_size: ChatSize; always_on_top: boolean; stop_shortcut_count: number; shortcuts: {label:string;keys:string;registered:boolean}[] };
 
 export const companion = {
+  appearanceUpdate: (appearance:Appearance) => invoke<void>("appearance_update",{appearance}),
+  controlSupportMode: (mode:SupportMode) => invoke<SessionSnapshot>("control_support_mode",{mode}),
   desktopStatus: () => invoke<DesktopStatus>("desktop_status"),
   desktopLayout: (expanded:boolean,remember=false) => invoke<void>("desktop_layout",{expanded,remember}),
   desktopUpdate: (chatSize?:ChatSize,alwaysOnTop?:boolean) => invoke<void>("desktop_update",{chatSize:chatSize??null,alwaysOnTop:alwaysOnTop??null}),

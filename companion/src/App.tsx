@@ -6,7 +6,7 @@ import { usePresence } from "./usePresence";
 import { getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { companion, type SessionSnapshot, type PreviousTurn, type Provider, type AwarenessStatus, type AwarenessCue, type ScreenStatus, type ScreenPreview } from "./native";
+import { companion, defaultAppearance, type Appearance, type SessionSnapshot, type PreviousTurn, type Provider, type AwarenessStatus, type AwarenessCue, type ScreenStatus, type ScreenPreview } from "./native";
 import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQuestion, resolveConfirmation, rememberTurn, awarenessCommand, screenCommand, monitoringRequest, monitoringGoalFromRequest, focusDeclaration, type Behaviour, type PendingAction } from "./dialogue";
 
 // Logical pixels. The visible native surface shrinks to the character when closed;
@@ -47,6 +47,7 @@ function DropTarget() {
 
 function CompanionApp() {
   const [current, setCurrent] = useState<SessionSnapshot | null>(null);
+  const [appearance,setAppearance]=useState<Appearance>(defaultAppearance);
   const [ready, setReady] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [resizing, setResizing] = useState(false);
@@ -95,7 +96,30 @@ function CompanionApp() {
   const visibilityEpoch = useRef(0);
   const actionRunning = useRef(false);
   const [error, setError] = useState("");
-  const presence = usePresence({ phase: current?.phase ?? "idle", quiet: current?.quiet_mode ?? true, ready: ready && current !== null, dragging, busy, reminder: !!ambientCue, expanded, reaction, reply });
+  const presence = usePresence({ reducedMotion:appearance.reduce_motion, phase: current?.phase ?? "idle", quiet: current?.quiet_mode ?? true, ready: ready && current !== null, dragging, busy, reminder: !!ambientCue, expanded, reaction, reply });
+
+  useEffect(()=>{
+    let disposed=false,revision=0;
+    const cleanups:(()=>void)[]=[];
+    const setup=async()=>{
+      const unlisten=await appWindow.listen<Appearance>("oplyra-appearance-changed",({payload})=>{revision++;if(!disposed)setAppearance(payload);});
+      if(disposed){unlisten();return;}cleanups.push(unlisten);
+      const support=await appWindow.listen<SessionSnapshot>("oplyra-support-changed",({payload})=>{
+        if(disposed||hiding.current)return;
+        setCurrent(payload);
+        if(payload.quiet_mode){
+          visibilityEpoch.current++;pendingAction.current=null;clearScreen();clearAwareness();
+          setReply("Quiet mode is on. Monitoring is off.");setSource("command");setLatency(null);
+        }
+      });
+      if(disposed){support();return;}cleanups.push(support);
+      const before=revision;
+      const status=await companion.desktopStatus();
+      if(!disposed&&before===revision)setAppearance(status.appearance);
+    };
+    void setup().catch(e=>{if(!disposed)setError(String(e));});
+    return()=>{disposed=true;cleanups.forEach(fn=>fn());};
+  },[]);
 
   useEffect(() => {
     let active = true;
@@ -825,7 +849,7 @@ function CompanionApp() {
   const phaseName = screen?.active && phase === "running" ? (screen.tab_reminders ? (screen.reference_set ? "Tab reminders on" : "Finding focus tab…") : screen.monitoring ? "Monitoring on" : screen.sample_ready ? "Screen · read" : "Screen · local") : awareness?.enabled && phase === "running" ? (checkIn ? "Check-in · aware" : "Working · aware") : phase === "running" ? "Working together" : phase === "paused" ? "On a break" : "Here with you";
 
   return (
-    <main className={`overlay ${expanded ? "is-expanded" : "is-compact"} ${dragging ? "is-dragging" : ""}`}>
+    <main className={`overlay ${expanded ? "is-expanded" : "is-compact"} ${dragging ? "is-dragging" : ""} character-size-${appearance.size} ${appearance.reduce_motion ? "reduce-motion" : ""}`}>
       <div className="character-stage">
         <button
           type="button"
@@ -847,7 +871,7 @@ function CompanionApp() {
           aria-label={`${phaseName}. Click to ${expanded ? "close" : "open"} controls; click and drag to move; drop on the bottom-centre bin to hide.`}
           title="Click for controls · Drag immediately to move · Drop on bin to hide"
         >
-          <Character pose={presence.pose} visible={presence.visible} />
+          <Character pose={presence.pose} visible={presence.visible} color={appearance.color} />
         </button>
         <div className="character-status" role="status">
           <span className={`status-light status-${phase}`} />

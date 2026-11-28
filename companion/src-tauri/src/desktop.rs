@@ -12,17 +12,28 @@ impl ChatSize {
         Self::Compact => (342,420), Self::Comfortable => (440,520), Self::Large => (560,650)
     } }
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all="snake_case")]
+pub enum CharacterSize { Small, #[default] Standard, Large }
+impl CharacterSize { fn dimensions(self)->(u32,u32){match self{Self::Small=>(172,186),Self::Standard=>(192,210),Self::Large=>(232,246)}} }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all="snake_case")]
+pub enum CharacterColor { #[default] Lavender, Mint, Peach, Sky }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Appearance {pub size:CharacterSize,pub color:CharacterColor,pub reduce_motion:bool}
 fn enabled() -> bool { true }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DesktopPrefs {
     pub chat_size: ChatSize,
+    pub appearance: Appearance,
     #[serde(default = "enabled")]
     pub always_on_top: bool,
     position: Option<(i32,i32)>,
 }
 impl Default for DesktopPrefs {
-    fn default() -> Self { Self { chat_size: ChatSize::Compact, always_on_top: true, position: None } }
+    fn default() -> Self { Self { chat_size: ChatSize::Compact, appearance: Appearance::default(), always_on_top: true, position: None } }
 }
 pub struct DesktopState {
     path: PathBuf,
@@ -35,7 +46,7 @@ pub struct DesktopState {
 #[derive(Clone, Serialize)]
 pub struct ShortcutInfo { pub label: &'static str, pub keys: &'static str, pub registered: bool }
 #[derive(Serialize)]
-pub struct DesktopStatus { pub chat_size: ChatSize, pub always_on_top: bool, pub shortcuts: Vec<ShortcutInfo>, pub stop_shortcut_count: u32 }
+pub struct DesktopStatus { pub appearance: Appearance, pub chat_size: ChatSize, pub always_on_top: bool, pub shortcuts: Vec<ShortcutInfo>, pub stop_shortcut_count: u32 }
 impl DesktopState {
     pub fn new(path: PathBuf) -> Self {
         let prefs = fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
@@ -85,7 +96,7 @@ fn place(window:&WebviewWindow,prefs:&DesktopPrefs,expanded:bool,restore:bool,re
     let monitor=if reset { fallback.as_ref().or(monitors.first()) } else {best.or(fallback.as_ref()).or(monitors.first())}.ok_or("No display available")?;
     let bounds=area(monitor);
     let scale=monitor.scale_factor();
-    let (w,h)=if expanded {prefs.chat_size.dimensions()} else {(192,210)};
+    let (w,h)=if expanded {prefs.chat_size.dimensions()} else {prefs.appearance.size.dimensions()};
     let logical=(f64::from(w).min(f64::from(bounds.w)/scale).floor().max(1.0),f64::from(h).min(f64::from(bounds.h)/scale).floor().max(1.0));
     let physical=((logical.0*scale).ceil() as u32,(logical.1*scale).ceil() as u32);
     let position=if reset || best.is_none() {
@@ -121,7 +132,7 @@ pub fn restore(window:&WebviewWindow)->Result<(),String> {
 #[tauri::command]
 pub fn desktop_status(state:State<'_,DesktopState>)->Result<DesktopStatus,String> {
     let prefs=state.prefs()?;
-    Ok(DesktopStatus{chat_size:prefs.chat_size,always_on_top:prefs.always_on_top,
+    Ok(DesktopStatus{appearance:prefs.appearance,chat_size:prefs.chat_size,always_on_top:prefs.always_on_top,
         shortcuts:state.shortcuts.lock().map_err(|_|"Shortcut status unavailable")?.clone(), stop_shortcut_count:state.stop_shortcut_count.load(Ordering::Acquire)})
 }
 #[tauri::command]
@@ -143,6 +154,26 @@ pub fn desktop_update(app:AppHandle,state:State<'_,DesktopState>,chat_size:Optio
         next.position=Some(place(&window,&next,state.expanded.load(Ordering::Acquire),false,false)?);
     }
     state.save(|p|*p=next)
+}
+#[tauri::command]
+pub fn appearance_update(app:AppHandle,state:State<'_,DesktopState>,appearance:Appearance)->Result<(),String> {
+    if app.get_webview_window("drop-zone").is_some(){return Err("Release the companion before changing appearance".into());}
+    let old=state.prefs()?;
+    let mut next=old.clone();
+    next.appearance=appearance;
+    let expanded=state.expanded.load(Ordering::Acquire);
+    let window=app.get_webview_window("main");
+    if let Some(w)=&window {
+        if old.appearance.size!=appearance.size {
+            next.position=Some(place(w,&next,expanded,false,false)?);
+        }
+    }
+    if let Err(e)=state.save(|p|{p.appearance=appearance;p.position=next.position;}) {
+        if let Some(w)=&window {let _=place(w,&old,expanded,true,false);}
+        return Err(e);
+    }
+    if let Some(w)=window {let _=w.emit("oplyra-appearance-changed",appearance);}
+    Ok(())
 }
 #[tauri::command]
 pub fn desktop_reset(app:AppHandle,state:State<'_,DesktopState>)->Result<(),String> {
@@ -233,6 +264,18 @@ mod tests{
         assert_eq!(overlap(a,Rect{x:90,y:90,w:20,h:20}),100);
         assert_eq!(overlap(a,Rect{x:-400,y:0,w:20,h:20}),0);
         assert_eq!(clamp_position((50,50),(200,200),a),(0,0));
+    }
+    #[test]fn legacy_appearance_migration(){
+        let p:DesktopPrefs=serde_json::from_str(r#"{"chat_size":"large","always_on_top":false,"position":[-42,70]}"#).unwrap();
+        assert_eq!(p.chat_size,ChatSize::Large);assert!(!p.always_on_top);assert_eq!(p.position,Some((-42,70)));
+        assert_eq!(p.appearance,Appearance::default());
+        let next=Appearance{size:CharacterSize::Large,color:CharacterColor::Mint,reduce_motion:true};
+        assert_eq!(serde_json::from_str::<Appearance>(&serde_json::to_string(&next).unwrap()).unwrap(),next);
+        assert!(serde_json::from_str::<Appearance>(r#"{"size":"giant"}"#).is_err());
+    }
+    #[test]fn folded_sizes_fit_monitor_gate(){
+        for s in [CharacterSize::Small,CharacterSize::Standard,CharacterSize::Large]{let(w,h)=s.dimensions();assert!(w<240&&h<260);}
+        assert_eq!(CharacterSize::Standard.dimensions(),(192,210));
     }
     #[test]fn preference_defaults_are_safe(){
         let p:DesktopPrefs=serde_json::from_str("{}").unwrap();

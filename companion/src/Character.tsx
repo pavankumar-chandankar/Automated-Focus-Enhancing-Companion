@@ -1,23 +1,31 @@
 import type { Pose } from "./presence";
+import type { CharacterColor } from "./native";
 import "./presence.css";
 
-export function Character({ pose, visible }: { pose: Pose; visible: boolean }) {
+const palettes:Record<CharacterColor,string[]> = {
+  lavender:["#E2DBFF","#B9B1F6","#9188DF","#A79EEE","#9789DE","#8173CD","#C9C1F8","#AFA5F0"],
+  mint:["#DDF9EA","#9ED9BE","#62AE92","#86CBAE","#6EB69A","#4F957C","#B9EBD5","#94D6BA"],
+  peach:["#FFE5D7","#F3B89D","#DB8B74","#ECA88D","#DD937D","#C37C66","#FFD1BC","#F5B59C"],
+  sky:["#DDF1FF","#A6D3F4","#71AAD9","#91C4EA","#79B0DC","#5D93C1","#C5E5FA","#9ECCEF"],
+};
+export function Character({ pose, visible, color="lavender" }: { pose: Pose; visible: boolean; color?:CharacterColor }) {
+  const palette=palettes[color];
   const sleepy = pose === "rest" || pose === "yawn";
   const happy = pose === "celebrate" || pose === "settle";
   const thinking = pose === "thinking";
   const reading = pose === "work" || pose === "turn-page";
   return <svg className={"living-character pose-" + pose + (visible ? "" : " motion-paused")} viewBox="0 0 204 180" aria-hidden="true">
     <defs>
-      <linearGradient id="living-body" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="#E2DBFF"/><stop offset=".54" stopColor="#B9B1F6"/><stop offset="1" stopColor="#9188DF"/></linearGradient>
+      <linearGradient id="living-body" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor={palette[0]}/><stop offset=".54" stopColor={palette[1]}/><stop offset="1" stopColor={palette[2]}/></linearGradient>
       <linearGradient id="living-shine" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#fff" stopOpacity=".8"/><stop offset="1" stopColor="#fff" stopOpacity="0"/></linearGradient>
     </defs>
     <ellipse cx="101" cy="166" rx="53" ry="7" fill="#4d456c" opacity=".16"/>
     <g className="living-motion"><g className="living-body">
-      <g className="living-arm left-arm"><path d="M62 108 Q34 103 38 128 Q47 145 63 123" fill="#A79EEE"/></g>
-      <g className="living-arm right-arm"><path d="M144 108 Q166 101 172 124 Q171 137 153 127" fill="#9789DE"/></g>
-      <g className="living-feet" fill="#8173CD"><path d="M77 142 Q71 155 83 156 L93 148"/><path d="M117 148 L129 156 Q141 155 132 142"/></g>
-      <g className="living-ear left-ear"><path d="M68 53 Q62 27 78 22 Q95 23 98 50" fill="#C9C1F8"/></g>
-      <g className="living-ear right-ear"><path d="M118 50 Q127 22 143 28 Q156 38 144 58" fill="#AFA5F0"/></g>
+      <g className="living-arm left-arm"><path d="M62 108 Q34 103 38 128 Q47 145 63 123" fill={palette[3]}/></g>
+      <g className="living-arm right-arm"><path d="M144 108 Q166 101 172 124 Q171 137 153 127" fill={palette[4]}/></g>
+      <g className="living-feet" fill={palette[5]}><path d="M77 142 Q71 155 83 156 L93 148"/><path d="M117 148 L129 156 Q141 155 132 142"/></g>
+      <g className="living-ear left-ear"><path d="M68 53 Q62 27 78 22 Q95 23 98 50" fill={palette[6]}/></g>
+      <g className="living-ear right-ear"><path d="M118 50 Q127 22 143 28 Q156 38 144 58" fill={palette[7]}/></g>
       <path d="M45 107 C41 64 60 41 100 39 C140 37 162 64 163 109 C164 144 142 157 102 157 C64 157 45 140 45 107Z" fill="url(#living-body)"/>
       <path d="M60 86 C63 58 82 49 107 50 C91 53 73 68 69 91Z" fill="url(#living-shine)"/>
       <g fill="#FFB4C9" opacity=".65"><ellipse cx="73" cy="110" rx="13" ry="7"/><ellipse cx="135" cy="110" rx="13" ry="7"/></g>

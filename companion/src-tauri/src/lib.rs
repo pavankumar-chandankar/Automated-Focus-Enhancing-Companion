@@ -289,6 +289,12 @@ fn control_action(app: tauri::AppHandle, store: State<'_, SessionStore>,
 }
 
 #[tauri::command]
+fn control_support_mode(app:tauri::AppHandle,store:State<'_,SessionStore>,mode:SupportMode)->Result<SessionSnapshot,String>{
+    let snapshot=set_support_mode(app.clone(),store,mode)?;
+    if let Some(w)=app.get_webview_window("main"){let _=w.emit("oplyra-support-changed",&snapshot);}
+    Ok(snapshot)
+}
+#[tauri::command]
 fn control_visibility(app: tauri::AppHandle, visible: bool) {
     if visible { overlay::request_show(app); }
     else { overlay::request_hide(&app); }
@@ -381,7 +387,7 @@ pub fn run() {
             screen::preview_screen, screen::analyze_screen, screen::get_analytics, screen::dismiss_focus_cue, screen::set_monitor_folded, open_analytics,
             open_control_center, control_status, control_action, control_visibility, control_quit,
             desktop::desktop_status, desktop::desktop_layout, desktop::desktop_update, desktop::desktop_reset,
-            desktop::desktop_cursor, desktop::desktop_take_chat
+            desktop::desktop_cursor, desktop::desktop_take_chat, desktop::appearance_update, control_support_mode
         ])
         .build(tauri::generate_context!())
         .expect("error while building Oplyra desktop")

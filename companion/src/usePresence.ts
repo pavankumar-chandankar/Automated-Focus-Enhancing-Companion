@@ -4,7 +4,7 @@ import type { Behaviour } from "./dialogue";
 import { scheduleAmbient, canAnimateAmbient, choosePose, reactionPose, type Pose } from "./presence";
 
 type Props = {
-  phase: Phase; quiet: boolean; ready: boolean; dragging: boolean;
+  phase: Phase; quiet: boolean; ready: boolean; dragging: boolean; reducedMotion?:boolean;
   busy: boolean; reminder: boolean; expanded: boolean; reaction: Behaviour | null; reply: string;
 };
 
@@ -60,7 +60,7 @@ export function usePresence(p: Props) {
   }, [p.reaction, p.reply]);
 
   const inputs = {...p, pressed, hovered, gesture, response, ambient};
-  const free = p.ready && visible && canAnimateAmbient(inputs);
+  const free = p.ready && visible && !p.reducedMotion && canAnimateAmbient(inputs);
   useEffect(() => {
     setAmbient(null);
     if (!free) return;
