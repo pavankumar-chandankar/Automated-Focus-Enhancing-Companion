@@ -63,3 +63,33 @@ test("quota exceptions are distinguishable from upstream exceptions",async()=>{
     assert.equal((await result.json()).choices[0].message.content,"Hello");
   } finally {globalThis.fetch=original;}
 });
+
+test("Workers-compatible redirect handling rejects redirects without forwarding the key",async()=>{
+  const env={GROQ_API_KEY:"fake-test-only",OPLYRA_CLIENT_TOKEN:"a".repeat(64),
+    QUOTA:{idFromName:()=>1,get:()=>({fetch:async()=>new Response(null,{status:200})})}};
+  const request=()=>new Request("https://example.test/v1/chat/completions",{
+    method:"POST",headers:{authorization:"Bearer "+"a".repeat(64),"content-type":"application/json"},body:JSON.stringify(body)});
+  const original=globalThis.fetch;
+  let calls=0;
+  try {
+    globalThis.fetch=async(url,init)=>{
+      calls++;
+      // Simulate the documented Workers runtime restriction.
+      if(init.redirect !== "manual") throw new TypeError("Unsupported redirect mode");
+      assert.equal(url,"https://api.groq.com/openai/v1/chat/completions");
+      assert.equal(init.headers.authorization,"Bearer fake-test-only");
+      return new Response(null,{status:302,headers:{location:"https://other.example/"}});
+    };
+    const result=await worker.fetch(request(),env);
+    assert.equal(result.status,502);
+    assert.deepEqual(await result.json(),{status:"provider_error"});
+    assert.equal(calls,1);
+    globalThis.fetch=async(url,init)=>{
+      if(init.redirect !== "manual") throw new TypeError("Unsupported redirect mode");
+      return new Response(JSON.stringify({choices:[{finish_reason:"stop",message:{role:"assistant",content:"Hello"}}]}));
+    };
+    const success=await worker.fetch(request(),env);
+    assert.equal(success.status,200);
+    assert.equal((await success.json()).choices[0].message.content,"Hello");
+  } finally {globalThis.fetch=original;}
+});

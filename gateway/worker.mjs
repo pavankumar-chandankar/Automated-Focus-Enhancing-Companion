@@ -112,11 +112,17 @@ export default {
         ? reply(429,"quota",{"retry-after":reservation.headers.get("retry-after") || "60"})
         : reply(503,"quota_unavailable");
       stage = "provider_connection";
+      // Workers does not implement redirect:"error": it throws before sending.
+      // Manual mode plus explicit rejection prevents forwarding credentials.
       const upstream = await fetch(UPSTREAM,{
-        method:"POST", redirect:"error", signal:AbortSignal.timeout(30000),
+        method:"POST", redirect:"manual", signal:AbortSignal.timeout(30000),
         headers:{"authorization":"Bearer "+env.GROQ_API_KEY,"content-type":"application/json"},
         body:JSON.stringify(payload)
       });
+      if (upstream.status >= 300 && upstream.status < 400) {
+        try { await upstream.body?.cancel(); } catch {}
+        return reply(502,"provider_error");
+      }
       if (!upstream.ok) {
         const retry = upstream.headers.get("retry-after");
         const code = upstream.status === 401 || upstream.status === 403 ? "provider_auth" :
