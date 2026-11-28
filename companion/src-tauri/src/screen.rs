@@ -242,7 +242,10 @@ pub fn start_follow_screen(app: AppHandle, state: State<'_, ScreenState>, cloud:
     }
     if switch_watch && cloud { return Err("Choose local tab reminders or AI monitoring".into()); }
     let generation = state.observation.lock().map_err(|_| "Screen state unavailable")?.generation;
-    request_screen_permission(app.clone())?;
+    // Chrome tab IDs do not require Screen Recording permission.
+    if switch_watch {
+        if !platform::supported() { return Err("Chrome tab reminders require macOS 14 or newer".into()); }
+    } else { request_screen_permission(app.clone())?; }
     if !visible_running(&app) { return Err("Screen consent was cancelled".into()); }
     let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
     if o.generation != generation { return Err("Screen consent was cancelled".into()); }
@@ -254,8 +257,9 @@ pub fn start_follow_screen(app: AppHandle, state: State<'_, ScreenState>, cloud:
     o.monitor.goal = goal;
     o.monitoring_started = Some(Instant::now());
     o.monitoring_elapsed_ms = 0;
-    o.analysis_detail = if switch_watch { "Local tab reminders · no cloud requests".into() } else if cloud { "Waiting for sustained work context".into() } else { "Cloud relevance checks off".into() };
-    o.detail = if switch_watch { "Close chat on your intended tab to set the reference".into() } else { "Following supported foreground apps".into() };
+    o.analysis_detail = if switch_watch { "Chrome tab IDs · local only".into() } else if cloud { "Waiting for sustained work context".into() } else { "Cloud relevance checks off".into() };
+    o.detail = if switch_watch { "Close chat and select your Chrome study tab".into() } else { "Following supported foreground apps".into() };
+    if switch_watch { eprintln!("[Oplyra monitor] Chrome ID monitoring authorized; waiting for chat fold"); }
     Ok(o.status())
 }
 
@@ -489,6 +493,7 @@ pub fn dismiss_focus_cue(app: AppHandle) { dismiss_cue(&app); }
 pub fn set_monitor_folded(app: AppHandle, state: State<'_, ScreenState>, folded: bool) -> Result<(), String> {
     let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
     o.folded = folded;
+    if o.switch_watch { eprintln!("[Oplyra monitor] chat folded={folded}"); }
     if !folded { o.switch_guard.gap(); }
     drop(o);
     if !folded { dismiss_cue(&app); }
@@ -509,12 +514,12 @@ pub fn test_cue(app: &AppHandle) {
 fn post_cue(app: &AppHandle, generation: u64, kind: i32) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
-        if !capture_allowed(&handle) { return; }
+        if !capture_allowed(&handle) { eprintln!("[Oplyra reminder] delivery skipped: companion unavailable or dragging"); return; }
         if kind == 0 && !compact_running(&handle) { return; }
         let allowed = handle.state::<ScreenState>().observation.lock().map(|o|
             o.generation == generation && o.selection.is_some() &&
             (if kind == 2 { o.switch_watch && o.folded && o.switch_guard.on_reference() } else if kind == 1 { o.switch_watch && o.folded && o.switch_guard.away() } else { o.cloud_context })).unwrap_or(false);
-        if !allowed { return; }
+        if !allowed { eprintln!("[Oplyra reminder] delivery skipped: reference or consent changed"); return; }
         if let Some(window) = handle.get_webview_window("main") {
             let shown = platform::show_cue(&window, kind);
             eprintln!("[Oplyra reminder] kind={kind} native_displayed={shown}");
@@ -527,12 +532,14 @@ fn switch_tick(app: &AppHandle, generation: u64) -> Result<ScreenStatus, String>
     let state = app.state::<ScreenState>();
     if !visible_running(app) {
         let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
-        if o.generation == generation { o.reset(); }
+        if o.generation == generation { eprintln!("[Oplyra monitor] stopped: focus session or companion not visible"); o.reset(); }
         return Ok(o.status());
     }
+    // Never call a Tauri window getter while holding the observation mutex.
+    let allowed = capture_allowed(app);
     {
         let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
-        if o.generation != generation || !o.folded || !capture_allowed(app) {
+        if o.generation != generation || !o.folded || !allowed {
             if o.generation == generation { o.switch_guard.gap(); }
             return Ok(o.status());
         }
@@ -544,7 +551,7 @@ fn switch_tick(app: &AppHandle, generation: u64) -> Result<ScreenStatus, String>
     if !o.folded || !allowed { o.switch_guard.gap(); return Ok(o.status()); }
     let (identity, reason) = match identity {
         Ok(v) => v,
-        Err(e) => { o.reset(); return Err(e); }
+        Err(e) => { eprintln!("[Oplyra monitor] Chrome detection failed: {e}"); o.reset(); return Err(e); }
     };
     o.monitor.metrics.samples += 1;
     o.monitor.metrics.unknown += 1;
@@ -567,7 +574,7 @@ fn switch_tick(app: &AppHandle, generation: u64) -> Result<ScreenStatus, String>
     let mut status = o.status(); status.cue = u.cue;
     drop(o);
     if u.anchored { eprintln!("[Oplyra monitor] reference registered"); post_cue(app, generation, 2); }
-    if u.changed { eprintln!("[Oplyra monitor] foreground identity changed"); }
+    if u.changed { eprintln!("[Oplyra monitor] Chrome tab ID changed"); }
     if u.returned { eprintln!("[Oplyra monitor] returned to reference"); dismiss_cue(app); }
     Ok(status)
 }
@@ -684,12 +691,12 @@ mod platform {
         fn oplyra_screen_list() -> *mut c_char;
         fn oplyra_screen_capture(id: u32, pid: i32, bundle: *const c_char) -> *mut c_char;
         fn oplyra_screen_free(value: *mut c_char);
-        fn oplyra_foreground_identity() -> *mut c_char;
+        fn oplyra_chrome_foreground_pid() -> i32;
         fn oplyra_show_focus_cue(anchor: *mut std::ffi::c_void, is_switch: i32) -> i32;
         fn oplyra_dismiss_focus_cue();
     }
     #[derive(Deserialize)]
-    struct ResultData { error: Option<String>, windows: Option<Vec<WindowChoice>>, text: Option<String>, inactive: Option<bool>, reason: Option<String> }
+    struct ResultData { error: Option<String>, windows: Option<Vec<WindowChoice>>, text: Option<String>, inactive: Option<bool> }
     fn decode(ptr: *mut c_char) -> Result<ResultData, String> {
         if ptr.is_null() { return Err("Native capture unavailable".into()); }
         let result = unsafe {
@@ -702,8 +709,36 @@ mod platform {
         Ok(result)
     }
     pub fn foreground_identity() -> Result<(Option<String>, Option<String>), String> {
-        let result = decode(unsafe { oplyra_foreground_identity() })?;
-        if result.inactive == Some(true) { Ok((None, result.reason)) } else { Ok((result.text, None)) }
+        // Only ask Chrome while it is actually the foreground app.
+        let pid = unsafe { oplyra_chrome_foreground_pid() };
+        if pid <= 0 { return Ok((None, Some("Waiting for Google Chrome in the foreground".into()))); }
+        let mut child = std::process::Command::new("/usr/bin/osascript")
+            .arg("-e").arg(crate::chrome_tab::SCRIPT)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+            .env_remove("GROQ_API_KEY").env_remove("DEEPSEEK_API_KEY")
+            .spawn().map_err(|_| "Could not start macOS Chrome tab reader")?;
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if started.elapsed() < Duration::from_secs(30) => std::thread::sleep(Duration::from_millis(40)),
+                _ => { let _ = child.kill(); let _ = child.wait(); return Err("Chrome Automation query timed out; allow access and enable reminders again".into()); }
+            }
+        }
+        let out = child.wait_with_output().map_err(|_| "Could not read Chrome Automation result")?;
+        if !out.status.success() {
+            let error = String::from_utf8_lossy(&out.stderr);
+            if error.contains("-1743") || error.contains("-1744") {
+                return Err("Chrome Automation permission denied. Enable Google Chrome in System Settings > Privacy & Security > Automation, then enable reminders again.".into());
+            }
+            return Err("Chrome Automation query failed. Check permission and keep a normal Chrome window open.".into());
+        }
+        if unsafe { oplyra_chrome_foreground_pid() } != pid {
+            return Ok((None, Some("Foreground application changed during check".into())));
+        }
+        let output = std::str::from_utf8(&out.stdout).map_err(|_| "Invalid Chrome tab response")?;
+        crate::chrome_tab::parse(output, pid)
     }
     pub fn show_cue(window: &tauri::WebviewWindow, kind: i32) -> bool {
         window.ns_window().ok().is_some_and(|ptr| unsafe { oplyra_show_focus_cue(ptr, kind) != 0 })

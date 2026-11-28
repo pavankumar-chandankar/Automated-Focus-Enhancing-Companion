@@ -5,6 +5,7 @@ mod overlay;
 mod awareness;
 mod screen;
 mod monitor;
+mod chrome_tab;
 use policy::{Feedback, SupportMode};
 
 use std::{fs, path::PathBuf, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
@@ -65,14 +66,14 @@ fn get_snapshot(store: State<'_, SessionStore>) -> Result<SessionSnapshot, Strin
 #[tauri::command]
 fn start_session(app: tauri::AppHandle, store: State<'_, SessionStore>, goal: String, next_step: String) -> Result<SessionSnapshot, String> {
     let result = store.mutate(|session, now| session.start(&goal, &next_step, now));
-    if result.is_ok() { awareness::stop(&app); screen::reset_analytics(&app); }
+    if result.is_ok() { awareness::stop(&app); screen::stop(&app); screen::reset_analytics(&app); }
     result
 }
 
 #[tauri::command]
 fn pause_session(app: tauri::AppHandle, store: State<'_, SessionStore>) -> Result<SessionSnapshot, String> {
     let result = store.mutate(|session, now| session.pause(now));
-    if result.is_ok() { awareness::stop(&app); }
+    if result.is_ok() { awareness::stop(&app); screen::stop(&app); }
     result
 }
 
@@ -84,7 +85,7 @@ fn resume_session(store: State<'_, SessionStore>) -> Result<SessionSnapshot, Str
 #[tauri::command]
 fn finish_session(app: tauri::AppHandle, store: State<'_, SessionStore>) -> Result<SessionSnapshot, String> {
     let result = store.mutate(|session, now| session.finish(now));
-    if result.is_ok() { awareness::stop(&app); }
+    if result.is_ok() { awareness::stop(&app); screen::stop(&app); }
     result
 }
 
@@ -96,7 +97,7 @@ fn save_next_step(store: State<'_, SessionStore>, next_step: String) -> Result<S
 #[tauri::command]
 fn set_quiet_mode(app: tauri::AppHandle, store: State<'_, SessionStore>, enabled: bool) -> Result<SessionSnapshot, String> {
     let result = store.mutate(|session, _now| { session.set_support_mode(if enabled { SupportMode::Quiet } else { SupportMode::Balanced }); Ok(()) });
-    if enabled && result.is_ok() { awareness::stop(&app); }
+    if enabled && result.is_ok() { awareness::stop(&app); screen::stop(&app); }
     result
 }
 
@@ -108,7 +109,7 @@ fn resume_with_assistance(store: State<'_, SessionStore>) -> Result<SessionSnaps
 #[tauri::command]
 fn set_support_mode(app: tauri::AppHandle, store: State<'_, SessionStore>, mode: SupportMode) -> Result<SessionSnapshot, String> {
     let result = store.mutate(|session, _now| { session.set_support_mode(mode); Ok(()) });
-    if mode == SupportMode::Quiet && result.is_ok() { awareness::stop(&app); }
+    if mode == SupportMode::Quiet && result.is_ok() { awareness::stop(&app); screen::stop(&app); }
     result
 }
 

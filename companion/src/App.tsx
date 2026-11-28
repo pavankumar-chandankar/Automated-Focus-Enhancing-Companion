@@ -201,7 +201,7 @@ function CompanionApp() {
       clearScreenPanel();
       screenActive.current = status.active;
       setScreen(status);
-      setReply(switchWatch ? "Close chat and click your work tab. Wait for ‘Focus tab set’ before switching. I’ll remind you without internet." : cloud ? "I’ll keep track of your goal and gently check in if a sustained change looks unrelated. Carry on; you don’t need to chat with me." : "I’ll observe supported apps locally. Semantic distraction assessment is off.");
+      setReply(switchWatch ? "Close chat and click your study tab in Chrome. Allow Chrome Automation if macOS asks. Wait for ‘Focus tab set’ before switching." : cloud ? "I’ll keep track of your goal and gently check in if a sustained change looks unrelated. Carry on; you don’t need to chat with me." : "I’ll observe supported apps locally. Semantic distraction assessment is off.");
       setSource("command");
     });
   }
@@ -334,7 +334,6 @@ function CompanionApp() {
 
   async function toggleDetails(open: boolean) {
     if (resizing) return;
-    if (open) void companion.setMonitorFolded(false).catch(() => {});
     setResizing(true);
     if (!open) {
       visibilityEpoch.current += 1;
@@ -350,6 +349,7 @@ function CompanionApp() {
       void companion.suspendAwareness().catch(() => {});
     }
     try {
+      if (open) await companion.setMonitorFolded(false);
       // The hit-test region grows only when the user explicitly opens controls.
       if (open) {
         const monitor = await currentMonitor();
@@ -793,8 +793,8 @@ function CompanionApp() {
           {screenPanel === "permission" && <div className="screen-controls">
             <label htmlFor="monitor-goal">Current focus goal</label>
             <textarea id="monitor-goal" rows={2} maxLength={160} value={monitorGoal} onPointerDown={() => { void companion.panelKeyboard(true).catch(() => {}); }} onChange={e => setMonitorGoal(e.target.value)} placeholder="e.g. Read my reliability engineering textbook" />
-            <p className="screen-detail">Close chat on your intended tab to set the reference. Local reminders detect title changes without reading screenshots or using AI.</p>
-            <button type="button" disabled={busy || !monitorGoal.trim()} onClick={() => startFollowing(false, true)}>Remind me on tab switches</button>
+            <p className="screen-detail">Chrome tab reminders read only the active tab ID through macOS Automation. Allow access if prompted. Normal Chrome windows only; no screenshots, titles, URLs or AI calls.</p>
+            <button type="button" disabled={busy || !monitorGoal.trim()} onClick={() => startFollowing(false, true)}>Remind me on Chrome tab switches</button>
             <button type="button" disabled={busy || provider !== "groq" || !monitorGoal.trim()} onClick={() => startFollowing(true)}>Monitor &amp; remind me (Groq)</button>
             <button type="button" disabled={busy} onClick={() => startFollowing(false)}>Local observation only</button>
             <button type="button" className="secondary-screen" disabled={busy} onClick={clearScreenPanel}>Cancel</button>

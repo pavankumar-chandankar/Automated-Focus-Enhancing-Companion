@@ -94,6 +94,7 @@ pub fn destroy_bin(app: &AppHandle) -> Result<(), String> {
 }
 
 fn destroy_main(app: &AppHandle) -> Result<(), String> {
+    crate::screen::stop(app);
     crate::awareness::stop(app);
     if let Some(analytics) = app.get_webview_window("analytics") { analytics.destroy().map_err(|e| e.to_string())?; }
     destroy_bin(app)?;
@@ -121,6 +122,7 @@ pub fn hide_companion(app: AppHandle, state: State<'_, OverlayState>, draft: Str
 }
 
 pub fn request_hide(app: &AppHandle) {
+    crate::screen::stop(app);
     crate::awareness::stop(app);
     let Some(window) = app.get_webview_window("main") else { return; };
     let ready = app.state::<OverlayState>().memory.lock().map(|m| m.ready).unwrap_or(false);
