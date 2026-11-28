@@ -25,14 +25,40 @@ export type ModelReply = { provider: Provider; model: string; screen_context_use
 export type AwarenessCue = "leisure_check" | "return_check";
 export type AwarenessStatus = { enabled: boolean; supported: boolean; category: "leisure" | "browser" | "other" | "unavailable"; cue: AwarenessCue | null };
 
-export type ScreenStatus = { supported: boolean; active: boolean; app: string | null; sample_ready: boolean; detail: string; cue: boolean; cloud_context: boolean; monitoring: boolean; relevance: "related" | "possible_distraction" | "unknown"; analysis_detail: string };
+export type ScreenStatus = { supported: boolean; active: boolean; app: string | null; sample_ready: boolean; detail: string; cue: boolean; cloud_context: boolean; monitoring: boolean; relevance: "related" | "possible_distraction" | "unknown"; analysis_detail: string; tab_reminders: boolean; reference_set: boolean };
 export type WindowChoice = { id: number; pid: number; bundle: string; app: string; title: string };
 export type ScreenPreview = { id: number; excerpt: string; goal: string; remaining_today: number; valid_for_ms: number };
 
 export type AnalyticsSnapshot = { goal: string; elapsed_ms: number; phase: Phase; active: boolean; monitoring: boolean; remaining_today: number; detail: string; metrics: { samples: number; related: number; possible_distraction: number; unknown: number; changes: number; analyses: number; check_ins: number; returns: number } };
 
+export type ControlAction = "start" | "pause" | "resume" | "finish" | "stop_monitoring";
+export type ControlStatus = { session: SessionSnapshot; screen: ScreenStatus; awareness: AwarenessStatus; visible: boolean; provider: Provider | null; gateway: boolean };
+
+export type ChatSize = "compact" | "comfortable" | "large";
+export type CharacterSize = "small" | "standard" | "large";
+export type CharacterColor = "lavender" | "mint" | "peach" | "sky";
+export type Appearance = {size:CharacterSize;color:CharacterColor;reduce_motion:boolean};
+export const defaultAppearance:Appearance = {size:"standard",color:"lavender",reduce_motion:false};
+export type DesktopStatus = { appearance:Appearance; chat_size: ChatSize; always_on_top: boolean; stop_shortcut_count: number; shortcuts: {label:string;keys:string;registered:boolean}[] };
+
 export const companion = {
-  startFollowScreen: (cloud: boolean, goal: string) => invoke<ScreenStatus>("start_follow_screen", { cloud, goal }),
+  appearanceUpdate: (appearance:Appearance) => invoke<void>("appearance_update",{appearance}),
+  controlSupportMode: (mode:SupportMode) => invoke<SessionSnapshot>("control_support_mode",{mode}),
+  desktopStatus: () => invoke<DesktopStatus>("desktop_status"),
+  desktopLayout: (expanded:boolean,remember=false) => invoke<void>("desktop_layout",{expanded,remember}),
+  desktopUpdate: (chatSize?:ChatSize,alwaysOnTop?:boolean) => invoke<void>("desktop_update",{chatSize:chatSize??null,alwaysOnTop:alwaysOnTop??null}),
+  desktopReset: () => invoke<void>("desktop_reset"),
+  desktopCursor: () => invoke<[number,number]>("desktop_cursor"),
+  desktopTakeChat: () => invoke<boolean>("desktop_take_chat"),
+  openControlCenter: () => invoke<void>("open_control_center"),
+  controlStatus: () => invoke<ControlStatus>("control_status"),
+  controlAction: (action: ControlAction, goal?: string, nextStep?: string) =>
+    invoke<SessionSnapshot>("control_action", { action, goal: goal ?? null, nextStep: nextStep ?? null }),
+  controlVisibility: (visible: boolean) => invoke<void>("control_visibility", { visible }),
+  controlQuit: () => invoke<void>("control_quit"),
+  startFollowScreen: (cloud: boolean, goal: string, switchWatch = false) => invoke<ScreenStatus>("start_follow_screen", { cloud, goal, switchWatch }),
+  dismissFocusCue: () => invoke<void>("dismiss_focus_cue"),
+  setMonitorFolded: (folded: boolean) => invoke<void>("set_monitor_folded", { folded }),
   openAnalytics: () => invoke<void>("open_analytics"),
   analytics: () => invoke<AnalyticsSnapshot>("get_analytics"),
   panelKeyboard: (enabled: boolean) => invoke<void>("panel_keyboard", { enabled }),

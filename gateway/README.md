@@ -1,0 +1,14 @@
+# Oplyra v0.14 — founder-only inference gateway
+
+The optional gateway routes the existing Groq chat, reviewed OCR and semantic classification calls through a private authenticated Cloudflare Worker. Existing local/direct transports remain available for development. Gateway mode never falls back to direct Groq. No change to sensing consent or character behavior.
+
+## One-time setup (macOS)
+Create/sign into a Cloudflare account on Workers Free (no paid upgrade). Enable the free workers.dev subdomain if the CLI requests it. Node/npm and macOS Keychain are required. From the repository root, run `bash gateway/setup-macos.sh`. Authenticate Wrangler in the browser, enter the Groq key only into Wrangler's secret prompt, then copy the deployed HTTPS origin printed by Wrangler. A random 256-bit founder token is generated locally and stored in Keychain; the Groq key is stored only as a Worker secret by this setup. No secrets in Git. The script runs an authenticated health check (not an inference test). Existing Groq keys in other shell files or Keychain entries are not automatically deleted.
+
+Launch from companion with `bash scripts/run-gateway.sh`. Native Rust reads the URL and founder token directly from Keychain and sends the token only to the scoped HTTPS Worker origin; the launcher unsets provider keys. Keychain access may require macOS authorization. Do not run shell tracing. The macOS security CLI briefly receives the generated founder token as an argument during setup. The old direct mode remains an explicitly selectable development option; the gateway launcher always fails closed.
+
+## Security and cost
+The worker enforces a fixed model, bounded payload and output sizes, no tools/streaming, TLS upstream and no redirects. A single SQLite Durable Object reserves attempts before upstream calls, 6/minute and 100/UTC day across chat and screen analysis; these are conservative app caps, not provider quota guarantees. No automatic retries or paid fallback. Only counter state is stored; no application prompt logging. Cloudflare and Groq still process authorized request data under their own terms. Keep both services on free plans; exhaustion returns errors. A bearer token can be copied by a sufficiently privileged local attacker. Rotate the token in Cloudflare and the Keychain if compromised. This is not a public multi-tenant authentication system; public distribution needs separate identities, per-user quotas, privacy review and operational hardening. Do not bundle this founder token into distributable binaries.
+
+## Tests
+Run `node --test gateway/worker.test.mjs`, and the usual frontend/Rust CI. Live deployment, Keychain and actual inference require founder acceptance. Wrangler major 4 is used via npx and downloaded at setup. Do not treat successful health as proof of upstream inference.

@@ -94,6 +94,7 @@ pub fn destroy_bin(app: &AppHandle) -> Result<(), String> {
 }
 
 fn destroy_main(app: &AppHandle) -> Result<(), String> {
+    crate::screen::stop(app);
     crate::awareness::stop(app);
     if let Some(analytics) = app.get_webview_window("analytics") { analytics.destroy().map_err(|e| e.to_string())?; }
     destroy_bin(app)?;
@@ -121,6 +122,8 @@ pub fn hide_companion(app: AppHandle, state: State<'_, OverlayState>, draft: Str
 }
 
 pub fn request_hide(app: &AppHandle) {
+    crate::desktop::clear_chat(app);
+    crate::screen::stop(app);
     crate::awareness::stop(app);
     let Some(window) = app.get_webview_window("main") else { return; };
     let ready = app.state::<OverlayState>().memory.lock().map(|m| m.ready).unwrap_or(false);
@@ -159,12 +162,14 @@ pub fn request_show(app: AppHandle) {
                             let _ = window.hide();
                             let _ = window.destroy();
                         }
+                        if let Err(e) = crate::desktop::restore(&window) { eprintln!("Desktop restore: {e}"); }
                         handle.state::<OverlayState>().showing.store(false, Ordering::Release);
+                        let _ = window.emit("oplyra-open-chat", ());
                     });
                     if scheduled.is_err() { app.state::<OverlayState>().showing.store(false, Ordering::Release); }
                 }
                 #[cfg(not(target_os = "macos"))]
-                { let _ = window.show(); app.state::<OverlayState>().showing.store(false, Ordering::Release); }
+                { let _ = crate::desktop::restore(&window); let _ = window.show(); app.state::<OverlayState>().showing.store(false, Ordering::Release); let _ = window.emit("oplyra-open-chat", ()); }
             }
             Err(e) => { app.state::<OverlayState>().showing.store(false, Ordering::Release); eprintln!("Oplyra restore failed: {e}"); }
         }

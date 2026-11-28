@@ -248,12 +248,62 @@ pub fn generate(message: &str, snapshot: &SessionSnapshot, history: &[PreviousTu
 
 fn send_request(provider: Provider, body: &Value) -> Result<Generated, String> { send_request_with_slot(provider, body, &BUSY) }
 
+// The gateway transport deliberately has no direct-provider fallback.
+fn gateway_url(value: &str) -> Result<String, String> {
+    let url = reqwest::Url::parse(value).map_err(|_| "Invalid Oplyra gateway URL")?;
+    let host = url.host_str().unwrap_or_default();
+    let parts: Vec<_> = host.split('.').collect();
+    if url.scheme() != "https" || parts.len() != 4 || parts[0] != "oplyra-gateway" ||
+        parts[1].is_empty() || parts[2] != "workers" || parts[3] != "dev" ||
+        !url.username().is_empty() || url.password().is_some() || url.port().is_some() ||
+        url.query().is_some() || url.fragment().is_some() || url.path() != "/" {
+        return Err("Invalid Oplyra gateway URL; use the assigned HTTPS workers.dev origin".into());
+    }
+    Ok(format!("{}v1/chat/completions", url))
+}
+
+#[cfg(target_os = "macos")]
+fn gateway_credential(service: &str) -> Result<String, String> {
+    let user = std::env::var("USER").map_err(|_| "Cannot identify Keychain account")?;
+    let output = std::process::Command::new("/usr/bin/security")
+        .args(["find-generic-password", "-a", &user, "-s", service, "-w"])
+        .env_remove("GROQ_API_KEY").env_remove("DEEPSEEK_API_KEY")
+        .output().map_err(|_| "Oplyra Keychain unavailable")?;
+    if !output.status.success() { return Err("Oplyra gateway setup required; check Keychain authorization".into()); }
+    let value = String::from_utf8(output.stdout).map_err(|_| "Invalid Keychain credential")?;
+    Ok(value.trim().to_owned())
+}
+#[cfg(not(target_os = "macos"))]
+fn gateway_credential(_: &str) -> Result<String, String> {
+    Err("Oplyra gateway setup is currently macOS-only".into())
+}
+
 fn send_request_with_slot(provider: Provider, body: &Value, busy: &AtomicBool) -> Result<Generated, String> {
     // Cloud is explicitly enabled by launch environment only. The API key is
     // never returned to the frontend, persisted or put into any prompt.
+    let gateway = if provider == Provider::Groq {
+        match std::env::var("OPLYRA_GROQ_TRANSPORT").as_deref() {
+            Ok("gateway") => true,
+            Ok("direct") | Err(std::env::VarError::NotPresent) => false,
+            _ => return Err("Invalid OPLYRA_GROQ_TRANSPORT".into()),
+        }
+    } else { false };
+    let endpoint = match provider {
+        Provider::Local => ENDPOINT.to_owned(),
+        Provider::Deepseek => CLOUD_ENDPOINT.to_owned(),
+        Provider::Groq if gateway => gateway_url(&gateway_credential("Oplyra.Gateway.URL")?)?,
+        Provider::Groq => GROQ_ENDPOINT.to_owned(),
+    };
     let key = match provider {
         Provider::Local => None,
         Provider::Deepseek => Some(std::env::var("DEEPSEEK_API_KEY").ok().filter(|k| !k.trim().is_empty()).ok_or("DeepSeek API key missing")?),
+        Provider::Groq if gateway => {
+            let token = gateway_credential("Oplyra.Gateway.Token")?;
+            if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err("Invalid Oplyra gateway token; run gateway setup".into());
+            }
+            Some(token)
+        },
         Provider::Groq => Some(std::env::var("GROQ_API_KEY").ok().filter(|k| !k.trim().is_empty()).ok_or("Groq API key missing")?),
     };
     if busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
@@ -272,7 +322,7 @@ fn send_request_with_slot(provider: Provider, body: &Value, busy: &AtomicBool) -
         .no_proxy().redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(2)).timeout(Duration::from_secs(45))
         .build().map_err(|_| "Could not initialize local model client")?;
-    let mut request = client.post(match provider { Provider::Local => ENDPOINT, Provider::Deepseek => CLOUD_ENDPOINT, Provider::Groq => GROQ_ENDPOINT }).json(&body);
+    let mut request = client.post(endpoint).json(&body);
     if let Some(key) = key { request = request.bearer_auth(key); }
     let response = request.send().map_err(|_| "Selected AI provider unavailable or timed out")?;
     if provider == Provider::Groq && response.status().as_u16() == 429 {
@@ -281,7 +331,28 @@ fn send_request_with_slot(provider: Provider, body: &Value, busy: &AtomicBool) -
         return Err("Groq rate limit reached; wait before trying again".into());
     }
     if !response.status().is_success() {
-        return Err(format!("AI provider returned HTTP {}", response.status().as_u16()));
+        let status = response.status().as_u16();
+        if gateway {
+            let mut raw = Vec::new();
+            if response.take(2048).read_to_end(&mut raw).is_ok() {
+                if let Ok(value) = serde_json::from_slice::<Value>(&raw) {
+                    let detail = match value["status"].as_str() {
+                        Some("quota_unavailable") => "gateway quota storage unavailable",
+                        Some("provider_connection") => "gateway could not connect to Groq",
+                        Some("provider_auth") => "Groq rejected server credential",
+                        Some("provider_request") => "Groq rejected model or request",
+                        Some("provider_error") => "Groq upstream error",
+                        Some("provider_response") => "Groq response could not be decoded",
+                        Some("not_configured") => "gateway secrets not configured",
+                        Some("unauthorized") => "gateway token rejected",
+                        Some("invalid_request") => "gateway rejected request format",
+                        _ => "gateway unavailable",
+                    };
+                    return Err(format!("Oplyra: {detail} (HTTP {status})"));
+                }
+            }
+        }
+        return Err(format!("AI provider returned HTTP {status}"));
     }
     let mut bytes = Vec::new();
     response.take(MAX_RESPONSE + 1).read_to_end(&mut bytes).map_err(|_| "Could not read local model response")?;
@@ -343,6 +414,17 @@ mod tests {
     }
     fn wrap(content: &str) -> Vec<u8> {
         serde_json::to_vec(&json!({"done":true,"message":{"role":"assistant","content":content}})).unwrap()
+    }
+    #[test]
+    fn gateway_origin_is_https_and_narrowly_scoped() {
+        assert_eq!(gateway_url("https://oplyra-gateway.example.workers.dev").unwrap(),
+            "https://oplyra-gateway.example.workers.dev/v1/chat/completions");
+        for bad in ["http://oplyra-gateway.example.workers.dev", "https://example.com",
+            "https://oplyra-gateway.example.workers.dev.evil.org", "https://user@oplyra-gateway.example.workers.dev",
+            "https://oplyra-gateway.example.workers.dev/other", "https://oplyra-gateway.example.workers.dev?x=1",
+            "https://oplyra-gateway.example.workers.dev:8443"] {
+            assert!(gateway_url(bad).is_err(), "{bad}");
+        }
     }
     #[test]
     fn bounded_loopback_request_has_no_tools_or_cloud() {

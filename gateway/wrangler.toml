@@ -1,0 +1,17 @@
+name = "oplyra-gateway"
+main = "worker.mjs"
+compatibility_date = "2026-01-01"
+workers_dev = true
+preview_urls = false
+keep_vars = true
+
+[observability]
+enabled = false
+
+[[durable_objects.bindings]]
+name = "QUOTA"
+class_name = "GatewayQuota"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GatewayQuota"]

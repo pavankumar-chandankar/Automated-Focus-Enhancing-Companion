@@ -1,15 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { AnalyticsWindow } from "./Analytics";
-import { getCurrentWindow, currentMonitor, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
+import { ControlCenter } from "./ControlCenter";
+import { Character } from "./Character";
+import { usePresence } from "./usePresence";
+import { getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { companion, type Phase, type SessionSnapshot, type PreviousTurn, type Provider, type AwarenessStatus, type AwarenessCue, type ScreenStatus, type ScreenPreview } from "./native";
-import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQuestion, resolveConfirmation, rememberTurn, awarenessCommand, screenCommand, monitoringRequest, monitoringGoalFromRequest, type Behaviour, type PendingAction } from "./dialogue";
+import { companion, defaultAppearance, type Appearance, type SessionSnapshot, type PreviousTurn, type Provider, type AwarenessStatus, type AwarenessCue, type ScreenStatus, type ScreenPreview } from "./native";
+import { planMessage, restingBehaviour, actionAllowed, confirmedPlan, proposalQuestion, resolveConfirmation, rememberTurn, awarenessCommand, screenCommand, monitoringRequest, monitoringGoalFromRequest, focusDeclaration, type Behaviour, type PendingAction } from "./dialogue";
 
 // Logical pixels. The visible native surface shrinks to the character when closed;
 // it is never a conventional full-window application.
-const COMPACT = new LogicalSize(192, 210);
-const OPEN = new LogicalSize(342, 420);
 const appWindow = getCurrentWindow();
 // A click remains a click; moving the pointer at least 4px while pressed
 // begins dragging immediately, with no long-press timer.
@@ -44,54 +45,15 @@ function DropTarget() {
 }
 
 
-function Character({ phase, behaviour }: { phase: Phase; behaviour: Behaviour }) {
-  return (
-    <svg className={`character-art phase-${phase} behaviour-${behaviour}`} viewBox="0 0 204 180" aria-hidden="true">
-      <defs>
-        <linearGradient id="oplyra-body" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#E2DBFF" />
-          <stop offset=".54" stopColor="#B9B1F6" />
-          <stop offset="1" stopColor="#9188DF" />
-        </linearGradient>
-        <linearGradient id="oplyra-shine" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#FFFFFF" stopOpacity=".8" />
-          <stop offset="1" stopColor="#FFFFFF" stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <ellipse className="creature-shadow" cx="101" cy="166" rx="53" ry="8" fill="#4D456C" opacity=".13" />
-      <g className="creature-float">
-        <path d="M62 108 Q34 103 38 128 Q47 145 63 123" fill="#A79EEE" />
-        <path d="M144 108 Q166 101 172 124 Q171 137 153 127" fill="#9789DE" />
-        <path d="M77 142 Q71 155 83 156 L93 148" fill="#8173CD" />
-        <path d="M117 148 L129 156 Q141 155 132 142" fill="#8173CD" />
-        <path d="M68 53 Q62 27 78 22 Q95 23 98 50" fill="#C9C1F8" />
-        <path d="M118 50 Q127 22 143 28 Q156 38 144 58" fill="#AFA5F0" />
-        <path d="M45 107 C41 64 60 41 100 39 C140 37 162 64 163 109 C164 144 142 157 102 157 C64 157 45 140 45 107Z" fill="url(#oplyra-body)" />
-        <path d="M60 86 C63 58 82 49 107 50 C91 53 73 68 69 91Z" fill="url(#oplyra-shine)" />
-        <ellipse cx="73" cy="110" rx="13" ry="7" fill="#FFB4C9" opacity=".6" />
-        <ellipse cx="135" cy="110" rx="13" ry="7" fill="#FFB4C9" opacity=".6" />
-        {behaviour === "resting" ? (
-          <g fill="none" stroke="#3C365A" strokeLinecap="round" strokeWidth="4.5">
-            <path d="M75 94 Q85 88 95 94" /><path d="M117 94 Q127 88 137 94" />
-          </g>
-        ) : (
-          <g className="eyes" fill="#352F53">
-            <ellipse cx="84" cy="93" rx="5.4" ry="8" /><ellipse cx="125" cy="93" rx="5.4" ry="8" />
-          </g>
-        )}
-        <path d={phase === "running" ? "M96 117 Q104 124 112 117" : "M99 117 Q104 121 109 117"} fill="none" stroke="#544B77" strokeWidth="3.3" strokeLinecap="round" />
-        {behaviour === "working" && <g className="work-book" stroke="#7968ba" strokeWidth="1.7" strokeLinejoin="round"><path d="M73 130 Q89 124 103 134 Q117 124 133 130 L132 149 Q117 145 103 154 Q89 145 74 149Z" fill="#f6f0ff"/><path d="M103 134V154" fill="none"/></g>}
-        {behaviour === "celebrating" && <g className="celebrate-spark" fill="#e5ab53"><path d="M37 44 l3 8 8 3 -8 3 -3 8 -3 -8 -8 -3 8 -3Z"/><path d="M170 28 l3 8 8 3 -8 3 -3 8 -3 -8 -8 -3 8 -3Z"/></g>}
-      </g>
-    </svg>
-  );
-}
-
 function CompanionApp() {
   const [current, setCurrent] = useState<SessionSnapshot | null>(null);
+  const [appearance,setAppearance]=useState<Appearance>(defaultAppearance);
   const [ready, setReady] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [resizing, setResizing] = useState(false);
+  const layoutLock = useRef(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const shortcutHandler = useRef<() => Promise<void>>(async()=>{});
   const [dragging, setDragging] = useState(false);
   const held = useRef<DragGesture | null>(null);
   const pendingPosition = useRef<PhysicalPosition | null>(null);
@@ -122,6 +84,7 @@ function CompanionApp() {
   const screenEpoch = useRef(0);
   const screenActive = useRef(false);
   const [ambientCue, setAmbientCue] = useState("");
+  const [nativeCue, setNativeCue] = useState(false);
   const ambientTimer = useRef<number | null>(null);
   const [checkIn, setCheckIn] = useState<AwarenessCue | null>(null);
   const checkInExpiry = useRef(0);
@@ -133,6 +96,30 @@ function CompanionApp() {
   const visibilityEpoch = useRef(0);
   const actionRunning = useRef(false);
   const [error, setError] = useState("");
+  const presence = usePresence({ reducedMotion:appearance.reduce_motion, phase: current?.phase ?? "idle", quiet: current?.quiet_mode ?? true, ready: ready && current !== null, dragging, busy, reminder: !!ambientCue, expanded, reaction, reply });
+
+  useEffect(()=>{
+    let disposed=false,revision=0;
+    const cleanups:(()=>void)[]=[];
+    const setup=async()=>{
+      const unlisten=await appWindow.listen<Appearance>("oplyra-appearance-changed",({payload})=>{revision++;if(!disposed)setAppearance(payload);});
+      if(disposed){unlisten();return;}cleanups.push(unlisten);
+      const support=await appWindow.listen<SessionSnapshot>("oplyra-support-changed",({payload})=>{
+        if(disposed||hiding.current)return;
+        setCurrent(payload);
+        if(payload.quiet_mode){
+          visibilityEpoch.current++;pendingAction.current=null;clearScreen();clearAwareness();
+          setReply("Quiet mode is on. Monitoring is off.");setSource("command");setLatency(null);
+        }
+      });
+      if(disposed){support();return;}cleanups.push(support);
+      const before=revision;
+      const status=await companion.desktopStatus();
+      if(!disposed&&before===revision)setAppearance(status.appearance);
+    };
+    void setup().catch(e=>{if(!disposed)setError(String(e));});
+    return()=>{disposed=true;cleanups.forEach(fn=>fn());};
+  },[]);
 
   useEffect(() => {
     let active = true;
@@ -144,6 +131,28 @@ function CompanionApp() {
       if (active) setCurrent(data);
     }).catch((e: unknown) => { if (active) setError(String(e)); });
     return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void appWindow.listen<SessionSnapshot>("oplyra-control-changed", ({payload}) => {
+      if (disposed || hiding.current) return;
+      // Invalidate pending proposals and stale responses from before a direct
+      // external control action. Preserve drafts and completed chat history.
+      visibilityEpoch.current += 1;
+      pendingAction.current = null;
+      awarenessPending.current = null;
+      screenEpoch.current += 1;
+      awarenessEpoch.current += 1;
+      clearScreenPanel();
+      setCurrent(payload);
+      if (payload.phase !== "running") { clearScreen(); clearAwareness(); }
+      setReply(payload.phase === "running" ? "Ready when you are." : payload.phase === "paused" ? "Take your time." : "Ready for your next session.");
+      setSource("command");
+      setLatency(null);
+    }).then(unlisten => { if (disposed) unlisten(); else cleanup = unlisten; }).catch(() => {});
+    return () => { disposed = true; cleanup?.(); };
   }, []);
 
   useEffect(() => {
@@ -165,11 +174,13 @@ function CompanionApp() {
   }
 
   function clearScreen() {
+    if (ambientTimer.current !== null) { window.clearTimeout(ambientTimer.current); ambientTimer.current = null; }
+    setNativeCue(false);
     setUsedScreenContext(false);
     screenActive.current = false;
     setAmbientCue("");
     clearScreenPanel();
-    setScreen(old => old ? {...old, active: false, app: null, sample_ready: false, cloud_context: false, monitoring: false, relevance: "unknown"} : null);
+    setScreen(old => old ? {...old, active: false, app: null, sample_ready: false, cloud_context: false, monitoring: false, tab_reminders: false, reference_set: false, cue: false, detail: "", analysis_detail: "", relevance: "unknown"} : null);
   }
 
   useEffect(() => {
@@ -180,11 +191,36 @@ function CompanionApp() {
     return () => { disposed = true; cleanup?.(); };
   }, []);
 
-  function showAmbient(text: string) {
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void appWindow.listen<SessionSnapshot>("oplyra-observation-stopped", ({payload}) => {
+      if (disposed || hiding.current) return;
+      visibilityEpoch.current += 1;
+      pendingAction.current = null;
+      clearScreen();
+      clearAwareness();
+      setCurrent(payload);
+      setReply("Monitoring is off. Your focus session is unchanged.");
+      setSource("command");
+      setLatency(null);
+      setNativeCue(false);
+      if (!expandedRef.current) {
+        setAmbientCue("Monitoring stopped");
+        ambientTimer.current = window.setTimeout(() => {
+          setAmbientCue(""); ambientTimer.current = null;
+        }, 4000);
+      }
+    }).then(unlisten => { if (disposed) unlisten(); else cleanup = unlisten; }).catch(() => {});
+    return () => { disposed = true; cleanup?.(); };
+  }, []);
+
+  function showAmbient(text: string, native = false) {
     if (expandedRef.current || held.current || hiding.current || actionRunning.current) return;
     if (ambientTimer.current !== null) window.clearTimeout(ambientTimer.current);
+    setNativeCue(native);
     setAmbientCue(text);
-    ambientTimer.current = window.setTimeout(() => { setAmbientCue(""); ambientTimer.current = null; }, 12000);
+    ambientTimer.current = window.setTimeout(() => { setAmbientCue(""); ambientTimer.current = null; }, native ? 8000 : 12000);
   }
 
   useEffect(() => {
@@ -203,7 +239,11 @@ function CompanionApp() {
         clearScreen();
         setError("Screen observation stopped: " + payload);
       });
-      if (disposed) second(); else cleanups.push(second);
+      if (disposed) { second(); return; } cleanups.push(second);
+      const third = await appWindow.listen<[string, boolean]>("oplyra-focus-cue", ({payload}) => {
+        if (!disposed && !hiding.current && (screenActive.current || payload[0] === "Hi! Your reminder bubble works.")) showAmbient(payload[0], payload[1]);
+      });
+      if (disposed) third(); else cleanups.push(third);
     };
     void subscribe().catch(() => {});
     return () => { disposed = true; cleanups.forEach(fn => fn()); if (ambientTimer.current !== null) window.clearTimeout(ambientTimer.current); };
@@ -220,7 +260,7 @@ function CompanionApp() {
     finally { actionRunning.current = false; setBusy(false); }
   }
 
-  function startFollowing(cloud: boolean) {
+  function startFollowing(cloud: boolean, switchWatch = false) {
     void screenOperation(async () => {
       const epoch = screenEpoch.current;
       if (current?.phase === "idle") {
@@ -228,14 +268,14 @@ function CompanionApp() {
         setCurrent(data);
       }
       if (epoch !== screenEpoch.current || hiding.current || !expandedRef.current) return;
-      const status = await companion.startFollowScreen(cloud, monitorGoal.trim());
+      const status = await companion.startFollowScreen(cloud, monitorGoal.trim(), switchWatch);
       if (epoch !== screenEpoch.current || hiding.current || !expandedRef.current) {
         await companion.stopScreen(); return;
       }
       clearScreenPanel();
       screenActive.current = status.active;
       setScreen(status);
-      setReply(cloud ? "I’ll keep track of your goal and gently check in if a sustained change looks unrelated. Carry on; you don’t need to chat with me." : "I’ll observe supported apps locally. Semantic distraction assessment is off.");
+      setReply(switchWatch ? "Close chat and click your study tab in Chrome. Allow Chrome Automation if macOS asks. Wait for ‘Focus tab set’ before switching." : cloud ? "I’ll keep track of your goal and gently check in if a sustained change looks unrelated. Carry on; you don’t need to chat with me." : "I’ll observe supported apps locally. Semantic distraction assessment is off.");
       setSource("command");
     });
   }
@@ -367,7 +407,8 @@ function CompanionApp() {
   }, []);
 
   async function toggleDetails(open: boolean) {
-    if (resizing) return;
+    if (layoutLock.current || held.current || finishingDrag.current || hiding.current) return;
+    layoutLock.current = true;
     setResizing(true);
     if (!open) {
       visibilityEpoch.current += 1;
@@ -375,7 +416,7 @@ function CompanionApp() {
         setReply("Ready when you are."); setSource(null);
       }
       pendingAction.current = null; awarenessPending.current = null; clearScreenPanel();
-      void companion.panelKeyboard(false).catch(() => {});
+      await companion.panelKeyboard(false).catch(() => {});
     }
     else { screenEpoch.current += 1; }
     if (open && awareness?.enabled) {
@@ -383,23 +424,13 @@ function CompanionApp() {
       void companion.suspendAwareness().catch(() => {});
     }
     try {
+      if (open) await companion.setMonitorFolded(false);
       // The hit-test region grows only when the user explicitly opens controls.
-      if (open) {
-        const monitor = await currentMonitor();
-        if (monitor) {
-          const area = monitor.workArea;
-          const scale = monitor.scaleFactor;
-          const size = new LogicalSize(Math.min(OPEN.width, Math.floor(area.size.width / scale)), Math.min(OPEN.height, Math.floor(area.size.height / scale)));
-          const pos = await appWindow.outerPosition();
-          const x = Math.max(area.position.x, Math.min(pos.x, area.position.x + area.size.width - Math.ceil(size.width * scale)));
-          const y = Math.max(area.position.y, Math.min(pos.y, area.position.y + area.size.height - Math.ceil(size.height * scale)));
-          await appWindow.setSize(size);
-          await appWindow.setPosition(new PhysicalPosition(Math.round(x), Math.round(y)));
-        } else await appWindow.setSize(OPEN);
-      } else await appWindow.setSize(COMPACT);
+      await companion.desktopLayout(open, true);
       expandedRef.current = open;
       visibilityEpoch.current += 1;
       setExpanded(open);
+      await companion.setMonitorFolded(!open);
       // Folding is presentation only; keep the latest ordinary reply and chat history.
       if (open) setAmbientCue("");
       if (open && checkIn && performance.now() < checkInExpiry.current) {
@@ -409,8 +440,40 @@ function CompanionApp() {
         setCheckIn(null);
       }
     } catch (failure) { setError(`Could not resize companion: ${String(failure)}`); }
-    finally { setResizing(false); }
+    finally { layoutLock.current = false; setResizing(false); }
   }
+
+  shortcutHandler.current=async()=>{
+    if(!ready || hiding.current || layoutLock.current || held.current || finishingDrag.current)return;
+    if(!await companion.desktopTakeChat())return;
+    if(!expandedRef.current)await toggleDetails(true);
+    if(expandedRef.current){
+      await companion.panelKeyboard(true);
+      requestAnimationFrame(()=>inputRef.current?.focus());
+    }
+  };
+  useEffect(()=>{
+    if(!ready)return;
+    let disposed=false,cleanup:(()=>void)|undefined;
+    const check=()=>{if(!disposed)void shortcutHandler.current().catch(e=>setError(String(e)));};
+    void appWindow.listen("oplyra-open-chat",check).then(fn=>{if(disposed)fn();else{cleanup=fn;check();}}).catch(()=>{});
+    // A native restore can race the new webview listener. The pending flag
+    // remains until the ready webview consumes it.
+    const timer=window.setInterval(check,750);
+    return()=>{disposed=true;cleanup?.();window.clearInterval(timer);};
+  },[ready]);
+  useEffect(()=>{
+    if(!ready)return;
+    let inFlight=false;
+    const check=async()=>{
+      if(inFlight||layoutLock.current||held.current||finishingDrag.current||hiding.current||document.hidden)return;
+      inFlight=true;
+      try{await companion.desktopLayout(expandedRef.current,false);}catch{/* explicit reset remains available */}
+      finally{inFlight=false;}
+    };
+    const timer=window.setInterval(()=>void check(),4000);
+    return()=>window.clearInterval(timer);
+  },[ready]);
 
   async function flushPosition() {
     if (movingPosition.current) return;
@@ -420,7 +483,8 @@ function CompanionApp() {
       while (pendingPosition.current) {
         const next = pendingPosition.current;
         pendingPosition.current = null;
-        await appWindow.setPosition(next);
+        const [x,y]=await companion.desktopCursor();
+        await appWindow.setPosition(new PhysicalPosition(Math.round(x-next.x),Math.round(y-next.y)));
       }
     } catch (failure) {
       setError(`Could not move Oplyra: ${String(failure)}`);
@@ -431,10 +495,9 @@ function CompanionApp() {
 
   function updateDragPosition(gesture: DragGesture) {
     if (!gesture.started || !gesture.base || gesture.ended) return;
-    pendingPosition.current = new PhysicalPosition(
-      Math.round(gesture.base.x + (gesture.latestX - gesture.downX) * gesture.scale),
-      Math.round(gesture.base.y + (gesture.latestY - gesture.downY) * gesture.scale),
-    );
+    // base is the physical cursor-to-window offset captured at press.
+    // Read native cursor coordinates across monitor/DPI boundaries.
+    pendingPosition.current = gesture.base;
     void flushPosition();
   }
 
@@ -477,6 +540,7 @@ function CompanionApp() {
   function onCharacterPointerDown(event: ReactPointerEvent<HTMLButtonElement>) {
     if (event.button !== 0 || resizing || held.current || finishingDrag.current || hiding.current) return;
     event.preventDefault();
+    presence.down();
     event.currentTarget.setPointerCapture(event.pointerId);
     const gesture: DragGesture = {
       pointerId: event.pointerId,
@@ -487,9 +551,10 @@ function CompanionApp() {
     };
     held.current = gesture;
     // Warm up native geometry immediately rather than waiting for drag start.
-    gesture.geometryPromise = Promise.all([appWindow.outerPosition(), appWindow.scaleFactor()])
-      .then(([base, scale]) => {
-        gesture.base = base;
+    const localX=event.clientX, localY=event.clientY;
+    gesture.geometryPromise = appWindow.scaleFactor()
+      .then(scale => {
+        gesture.base = new PhysicalPosition(Math.round(localX*scale),Math.round(localY*scale));
         gesture.scale = scale;
         if (gesture.started && !gesture.ended) updateDragPosition(gesture);
       })
@@ -499,6 +564,13 @@ function CompanionApp() {
   }
 
   function onCharacterPointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    if (bounds.width && bounds.height) {
+      const x = Math.max(-4, Math.min(4, ((event.clientX - bounds.left) / bounds.width - .5) * 8));
+      const y = Math.max(-3, Math.min(3, ((event.clientY - bounds.top) / bounds.height - .5) * 6));
+      event.currentTarget.style.setProperty("--gaze-x", x + "px");
+      event.currentTarget.style.setProperty("--gaze-y", y + "px");
+    }
     const gesture = held.current;
     if (!gesture || gesture.pointerId !== event.pointerId || gesture.ended) return;
     gesture.latestX = event.screenX;
@@ -520,6 +592,7 @@ function CompanionApp() {
     if (!gesture || gesture.pointerId !== event.pointerId) return;
     held.current = null;
     gesture.ended = true;
+    presence.up(cancelled, gesture.started);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
@@ -542,6 +615,7 @@ function CompanionApp() {
           if (cancelled) await invoke("cancel_companion_drag");
           else if (await invoke<boolean>("finish_companion_drag")) await hideOverlay();
         }
+        if(!hiding.current) await companion.desktopLayout(expandedRef.current,true);
       } catch (failure) {
         setError(`Could not complete drag: ${String(failure)}`);
       } finally {
@@ -554,7 +628,8 @@ function CompanionApp() {
   async function sendMessage() {
     if (actionRunning.current || hiding.current || !current || !message.trim()) return;
     const userMessage = message.trim();
-    const requestedMonitoring = screenCommand(userMessage) !== "choose" && monitoringRequest(userMessage);
+    const declaredGoal = !screen?.active ? focusDeclaration(userMessage) : null;
+    const requestedMonitoring = !!declaredGoal || (screenCommand(userMessage) !== "choose" && monitoringRequest(userMessage));
     const screenRequest = requestedMonitoring ? "choose" : screenCommand(userMessage) ?? (screen?.active && /^what can you see[.!?]*$/i.test(userMessage) ? "preview" : null);
     if (screenRequest && !(screenRequest === "preview" && screen?.cloud_context)) {
       pendingAction.current = null;
@@ -572,8 +647,8 @@ function CompanionApp() {
           screenActive.current = false;
           setAmbientCue("");
           setScreen(old => old ? {...old, active:false, app:null, sample_ready:false, cloud_context:false, monitoring:false, relevance:"unknown"} : null);
-          setMonitorGoal(monitoringGoalFromRequest(userMessage, current.phase === "idle" ? "" : current.goal));
-          setReply("I can follow your work and gently check in if you drift. Confirm your goal below.");
+          setMonitorGoal(declaredGoal ?? monitoringGoalFromRequest(userMessage, current.phase === "idle" ? "" : current.goal));
+          setReply("I can remind you when you leave your focus tab. Confirm your goal below.");
           setScreenPanel("permission");
         });
         return;
@@ -771,15 +846,16 @@ function CompanionApp() {
   }, [expanded, resizing]);
 
   const phase = current?.phase ?? "idle";
-  const behaviour = checkIn && !expanded ? "attentive" : reaction ?? (expanded ? "attentive" : restingBehaviour(phase));
-  const phaseName = screen?.active && phase === "running" ? (screen.monitoring ? "Monitoring on" : screen.sample_ready ? "Screen · read" : "Screen · local") : awareness?.enabled && phase === "running" ? (checkIn ? "Check-in · aware" : "Working · aware") : phase === "running" ? "Working together" : phase === "paused" ? "On a break" : "Here with you";
+  const phaseName = screen?.active && phase === "running" ? (screen.tab_reminders ? (screen.reference_set ? "Tab reminders on" : "Finding focus tab…") : screen.monitoring ? "Monitoring on" : screen.sample_ready ? "Screen · read" : "Screen · local") : awareness?.enabled && phase === "running" ? (checkIn ? "Check-in · aware" : "Working · aware") : phase === "running" ? "Working together" : phase === "paused" ? "On a break" : "Here with you";
 
   return (
-    <main className={`overlay ${expanded ? "is-expanded" : "is-compact"} ${dragging ? "is-dragging" : ""}`}>
+    <main className={`overlay ${expanded ? "is-expanded" : "is-compact"} ${dragging ? "is-dragging" : ""} character-size-${appearance.size} ${appearance.reduce_motion ? "reduce-motion" : ""}`}>
       <div className="character-stage">
         <button
           type="button"
           className="character-button"
+          onPointerEnter={presence.enter}
+          onPointerLeave={(event) => { presence.leave(); event.currentTarget.style.removeProperty("--gaze-x"); event.currentTarget.style.removeProperty("--gaze-y"); }}
           onPointerDown={onCharacterPointerDown}
           onPointerMove={onCharacterPointerMove}
           onPointerUp={(event) => endCharacterPointer(event, false)}
@@ -795,18 +871,18 @@ function CompanionApp() {
           aria-label={`${phaseName}. Click to ${expanded ? "close" : "open"} controls; click and drag to move; drop on the bottom-centre bin to hide.`}
           title="Click for controls · Drag immediately to move · Drop on bin to hide"
         >
-          <Character phase={phase} behaviour={behaviour} />
+          <Character pose={presence.pose} visible={presence.visible} color={appearance.color} />
         </button>
         <div className="character-status" role="status">
           <span className={`status-light status-${phase}`} />
           <span>{phaseName}</span>
         </div>
-        {!expanded && !dragging && ambientCue && <div className="ambient-cue" role="status">{ambientCue}</div>}
+        {!expanded && !dragging && ambientCue && !nativeCue && <div className="ambient-cue" role="status">{ambientCue}</div>}
       </div>
 
       {expanded && (
         <section id="companion-controls" className="conversation-bubble" aria-label="Talk to Oplyra">
-          <div className="conversation-heading"><strong>Oplyra</strong><div className="heading-actions"><button type="button" onClick={() => void companion.openAnalytics().catch(e => setError(String(e)))} aria-label="Open separate analytics window" title="Analytics">↗</button><button type="button" onClick={() => void toggleDetails(false)} aria-label="Fold conversation">−</button></div></div>
+          <div className="conversation-heading"><strong>Oplyra</strong><div className="heading-actions"><button type="button" onClick={() => void companion.openControlCenter().catch(e => setError(String(e)))} aria-label="Open Control Center" title="Control Center">⚙</button><button type="button" onClick={() => void companion.openAnalytics().catch(e => setError(String(e)))} aria-label="Open separate analytics window" title="Analytics">↗</button><button type="button" onClick={() => void toggleDetails(false)} aria-label="Fold conversation">−</button></div></div>
           <div ref={replyArea} className="conversation-content">
           <p className="companion-reply" role="status" aria-live="polite">
             {reply || (phase === "running" ? "How's it going?" : phase === "paused" ? "Ready when you are." : "Let's spend some time together.")}
@@ -814,11 +890,12 @@ function CompanionApp() {
           {screenPanel === "permission" && <div className="screen-controls">
             <label htmlFor="monitor-goal">Current focus goal</label>
             <textarea id="monitor-goal" rows={2} maxLength={160} value={monitorGoal} onPointerDown={() => { void companion.panelKeyboard(true).catch(() => {}); }} onChange={e => setMonitorGoal(e.target.value)} placeholder="e.g. Read my reliability engineering textbook" />
-            <p className="screen-detail">Start on the intended document. If you say “this document”, the first titled work window becomes the reference. Stop before opening private material.</p>
+            <p className="screen-detail">Chrome tab reminders read only the active tab ID through macOS Automation. Allow access if prompted. Normal Chrome windows only; no screenshots, titles, URLs or AI calls.</p>
+            <button type="button" disabled={busy || !monitorGoal.trim()} onClick={() => startFollowing(false, true)}>Remind me on Chrome tab switches</button>
             <button type="button" disabled={busy || provider !== "groq" || !monitorGoal.trim()} onClick={() => startFollowing(true)}>Monitor &amp; remind me (Groq)</button>
             <button type="button" disabled={busy} onClick={() => startFollowing(false)}>Local observation only</button>
             <button type="button" className="secondary-screen" disabled={busy} onClick={clearScreenPanel}>Cancel</button>
-            <p className="screen-detail">Monitoring sends short window-title and OCR excerpts (up to 600 characters) plus your goal to Groq automatically after sustained changes, and during screen-related chat. Shared limit 20/day; at least 8 reserved from background checks. No screenshots sent.</p>
+            <p className="screen-detail">Only the separate Groq option sends short window-title/OCR excerpts and your goal automatically. Shared limit 20/day; no screenshots sent. Local tab reminders use no Groq quota.</p>
           </div>}
           {screenPanel === "preview" && screenPreview && <div className="screen-controls">
             <p className="screen-detail">Goal: {screenPreview.goal || "(not set)"}</p>
@@ -831,7 +908,7 @@ function CompanionApp() {
           {screen?.active && <div className="screen-diagnostics"><p className="screen-detail">{screen.detail || "Waiting for work app"}</p>{screen.analysis_detail && <p className="screen-detail">{screen.analysis_detail}</p>}{screen.cloud_context && usedScreenContext && <p className="screen-detail">Last reply used fresh screen text.</p>}</div>}
           </div>
           <form className="conversation-form" onSubmit={(event) => { event.preventDefault(); void sendMessage(); }}>
-            <input aria-label="Type to Oplyra" value={message} maxLength={300}
+            <input ref={inputRef} aria-label="Type to Oplyra" value={message} maxLength={300}
               placeholder={pendingAction.current || awarenessPending.current !== null ? "Yes or no…" : "Say something…"} disabled={!ready || !current || busy}
               onPointerDown={() => { void companion.panelKeyboard(true).catch(() => {}); }}
               onChange={(event) => setMessage(event.target.value)} />
@@ -849,5 +926,5 @@ function CompanionApp() {
 }
 
 export default function App() {
-  return window.location.hash === "#analytics" ? <AnalyticsWindow /> : window.location.hash === "#drop-zone" ? <DropTarget /> : <CompanionApp />;
+  return window.location.hash === "#control-center" ? <ControlCenter /> : window.location.hash === "#analytics" ? <AnalyticsWindow /> : window.location.hash === "#drop-zone" ? <DropTarget /> : <CompanionApp />;
 }

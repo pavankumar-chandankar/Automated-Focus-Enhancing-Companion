@@ -4,7 +4,7 @@ use crate::{model::Phase, SessionStore};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::{Path, PathBuf}, sync::Mutex, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 use tauri::{AppHandle, Emitter, Manager, State};
-use crate::monitor::{Monitor, Metrics, Relevance};
+use crate::monitor::{Monitor, Metrics, Relevance, SwitchGuard};
 use std::hash::{Hash, Hasher};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(15);
@@ -34,6 +34,8 @@ pub struct ScreenStatus {
     monitoring: bool,
     relevance: Relevance,
     analysis_detail: String,
+    tab_reminders: bool,
+    reference_set: bool,
 }
 
 #[derive(Clone)]
@@ -68,6 +70,9 @@ struct Observation {
     last_cue: Option<Instant>,
     cues: u8,
     cloud_context: bool,
+    switch_watch: bool,
+    folded: bool,
+    switch_guard: SwitchGuard,
     monitor: Monitor,
     relevance: Option<Relevance>,
     monitoring_started: Option<Instant>,
@@ -82,6 +87,9 @@ impl Observation {
         self.generation = self.generation.wrapping_add(1);
         self.selection = None;
         self.cloud_context = false;
+        self.switch_watch = false;
+        self.folded = false;
+        self.switch_guard = SwitchGuard::default();
         self.monitor.clear_context();
         self.relevance = None;
         self.choices.clear();
@@ -105,8 +113,8 @@ impl Observation {
             app: self.selection.as_ref().map(|w| w.app.clone()),
             sample_ready: self.fresh(Instant::now()).is_some(),
             detail: self.detail.clone(), cue: false, cloud_context: self.cloud_context,
-            monitoring: self.cloud_context && !self.monitor.goal.is_empty(), relevance: self.relevance.unwrap_or(Relevance::Unknown),
-            analysis_detail: self.analysis_detail.clone(),
+            monitoring: (self.cloud_context || self.switch_watch) && !self.monitor.goal.is_empty(), relevance: self.relevance.unwrap_or(Relevance::Unknown),
+            analysis_detail: self.analysis_detail.clone(), tab_reminders: self.switch_watch, reference_set: self.switch_guard.anchored(),
         }
     }
 }
@@ -180,6 +188,7 @@ fn compact_running(app: &AppHandle) -> bool {
 }
 
 pub fn stop(app: &AppHandle) {
+    dismiss_cue(app);
     let mut was_active = false;
     if let Some(state) = app.try_state::<ScreenState>() {
         if let Ok(mut observation) = state.observation.lock() {
@@ -192,8 +201,9 @@ pub fn stop(app: &AppHandle) {
     }
 }
 #[tauri::command]
-pub fn stop_screen(state: State<'_, ScreenState>) -> Result<(), String> {
+pub fn stop_screen(app: AppHandle, state: State<'_, ScreenState>) -> Result<(), String> {
     state.observation.lock().map_err(|_| "Screen state unavailable")?.reset();
+    dismiss_cue(&app);
     Ok(())
 }
 
@@ -224,26 +234,32 @@ pub fn request_screen_permission(app: AppHandle) -> Result<(), String> {
 // Explicit session opt-in, no window chooser. This does not bypass the OS
 // permission, app allowlist or running-session/visibility gates.
 #[tauri::command]
-pub fn start_follow_screen(app: AppHandle, state: State<'_, ScreenState>, cloud: bool, goal: String) -> Result<ScreenStatus, String> {
+pub fn start_follow_screen(app: AppHandle, state: State<'_, ScreenState>, cloud: bool, goal: String, switch_watch: bool) -> Result<ScreenStatus, String> {
     let goal = goal.chars().filter(|c| !c.is_control() || *c == '\n').take(160).collect::<String>().trim().to_owned();
-    if cloud && goal.is_empty() { return Err("Tell me what you want to focus on first".into()); }
+    if (cloud || switch_watch) && goal.is_empty() { return Err("Tell me what you want to focus on first".into()); }
     if cloud && crate::intelligence::configured_provider()? != crate::intelligence::Provider::Groq {
         return Err("AI screen context requires the Groq provider".into());
     }
+    if switch_watch && cloud { return Err("Choose local tab reminders or AI monitoring".into()); }
     let generation = state.observation.lock().map_err(|_| "Screen state unavailable")?.generation;
-    request_screen_permission(app.clone())?;
+    // Chrome tab IDs do not require Screen Recording permission.
+    if switch_watch {
+        if !platform::supported() { return Err("Chrome tab reminders require macOS 14 or newer".into()); }
+    } else { request_screen_permission(app.clone())?; }
     if !visible_running(&app) { return Err("Screen consent was cancelled".into()); }
     let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
     if o.generation != generation { return Err("Screen consent was cancelled".into()); }
     o.reset();
     o.selection = Some(WindowChoice { id: 0, pid: 0, bundle: String::new(), app: "Foreground work apps".into(), title: String::new() });
     o.cloud_context = cloud;
+    o.switch_watch = switch_watch;
     o.monitor = Monitor::default();
     o.monitor.goal = goal;
     o.monitoring_started = Some(Instant::now());
     o.monitoring_elapsed_ms = 0;
-    o.analysis_detail = if cloud { "Waiting for sustained work context".into() } else { "Cloud relevance checks off".into() };
-    o.detail = "Following supported foreground apps".into();
+    o.analysis_detail = if switch_watch { "Chrome tab IDs · local only".into() } else if cloud { "Waiting for sustained work context".into() } else { "Cloud relevance checks off".into() };
+    o.detail = if switch_watch { "Close chat and select your Chrome study tab".into() } else { "Following supported foreground apps".into() };
+    if switch_watch { eprintln!("[Oplyra monitor] Chrome ID monitoring authorized; waiting for chat fold"); }
     Ok(o.status())
 }
 
@@ -336,6 +352,7 @@ pub async fn sample_screen(app: AppHandle) -> Result<ScreenStatus, String> {
         let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
         if !visible { o.reset(); return Ok(o.status()); }
         let Some(choice) = o.selection.clone() else { return Ok(o.status()); };
+        if o.switch_watch { return Ok(o.status()); }
         if !allowed { o.monitor.reset_continuity(); return Ok(o.status()); }
         if o.busy ||
             o.last_attempt.is_some_and(|at| at.elapsed() < SAMPLE_INTERVAL) {
@@ -453,7 +470,7 @@ pub fn get_analytics(app: AppHandle, state: State<'_, ScreenState>) -> Result<An
     let remaining_today = Budget::read(&state.budget_path).and_then(|b| Ok(b.remaining(wall_seconds()?))).unwrap_or(0);
     Ok(Analytics { goal: if o.monitor.goal.is_empty() { session.goal } else { o.monitor.goal.clone() },
         elapsed_ms: o.elapsed_ms(), phase: session.phase, active: o.selection.is_some(),
-        monitoring: o.cloud_context, metrics: o.monitor.metrics.clone(), remaining_today,
+        monitoring: o.cloud_context || o.switch_watch, metrics: o.monitor.metrics.clone(), remaining_today,
         detail: [o.detail.as_str(), o.analysis_detail.as_str()].into_iter().filter(|v| !v.is_empty()).collect::<Vec<_>>().join(" · ") })
 }
 pub fn reset_analytics(app: &AppHandle) {
@@ -462,18 +479,134 @@ pub fn reset_analytics(app: &AppHandle) {
     }
 }
 
-// Native scheduler: unaffected by WebKit background timer throttling.
+// Native speech panel, independent of the webview.
+pub fn dismiss_cue(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    { let _ = app.run_on_main_thread(|| platform::dismiss_cue()); }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = app; }
+}
+#[tauri::command]
+pub fn dismiss_focus_cue(app: AppHandle) { dismiss_cue(&app); }
+
+#[tauri::command]
+pub fn set_monitor_folded(app: AppHandle, state: State<'_, ScreenState>, folded: bool) -> Result<(), String> {
+    let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
+    o.folded = folded;
+    if o.switch_watch { eprintln!("[Oplyra monitor] chat folded={folded}"); }
+    if !folded { o.switch_guard.gap(); }
+    drop(o);
+    if !folded { dismiss_cue(&app); }
+    Ok(())
+}
+
+pub fn test_cue(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(window) = handle.get_webview_window("main") {
+            let shown = platform::show_cue(&window, 3);
+            eprintln!("[Oplyra reminder] native test displayed={shown} (close chat first)");
+            let _ = window.emit("oplyra-focus-cue", ("Hi! Your reminder bubble works.", shown));
+        }
+    });
+}
+
+fn post_cue(app: &AppHandle, generation: u64, kind: i32) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if !capture_allowed(&handle) { eprintln!("[Oplyra reminder] delivery skipped: companion unavailable or dragging"); return; }
+        if kind == 0 && !compact_running(&handle) { return; }
+        let allowed = handle.state::<ScreenState>().observation.lock().map(|o|
+            o.generation == generation && o.selection.is_some() &&
+            (if kind == 2 { o.switch_watch && o.folded && o.switch_guard.on_reference() } else if kind == 1 { o.switch_watch && o.folded && o.switch_guard.away() } else { o.cloud_context })).unwrap_or(false);
+        if !allowed { eprintln!("[Oplyra reminder] delivery skipped: reference or consent changed"); return; }
+        if let Some(window) = handle.get_webview_window("main") {
+            let shown = platform::show_cue(&window, kind);
+            eprintln!("[Oplyra reminder] kind={kind} native_displayed={shown}");
+            let text = match kind { 2 => "Focus tab set. I’ll keep you on track.", 1 => "Hey, switched tabs. Back to your focus?", _ => "Hey, still on your task? Ready to get back to it?" };
+            let _ = window.emit("oplyra-focus-cue", (text, shown));
+        }
+    });
+}
+fn switch_tick(app: &AppHandle, generation: u64) -> Result<ScreenStatus, String> {
+    let state = app.state::<ScreenState>();
+    if !visible_running(app) {
+        let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
+        if o.generation == generation { eprintln!("[Oplyra monitor] stopped: focus session or companion not visible"); o.reset(); }
+        return Ok(o.status());
+    }
+    // Never call a Tauri window getter while holding the observation mutex.
+    let allowed = capture_allowed(app);
+    {
+        let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
+        if o.generation != generation || !o.folded || !allowed {
+            if o.generation == generation { o.switch_guard.gap(); }
+            return Ok(o.status());
+        }
+    }
+    let identity = platform::foreground_identity();
+    let allowed = capture_allowed(app);
+    let mut o = state.observation.lock().map_err(|_| "Screen state unavailable")?;
+    if o.generation != generation || !o.switch_watch { return Ok(o.status()); }
+    if !o.folded || !allowed { o.switch_guard.gap(); return Ok(o.status()); }
+    let (identity, reason) = match identity {
+        Ok(v) => v,
+        Err(e) => { eprintln!("[Oplyra monitor] Chrome detection failed: {e}"); o.reset(); return Err(e); }
+    };
+    o.monitor.metrics.samples += 1;
+    o.monitor.metrics.unknown += 1;
+    let Some(identity) = identity else {
+        o.switch_guard.gap();
+        let detail = reason.unwrap_or_else(|| "Waiting for a titled supported foreground tab".into());
+        if o.detail != detail { eprintln!("[Oplyra monitor] {detail}"); }
+        o.detail = detail;
+        return Ok(o.status());
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    identity.hash(&mut hasher);
+    drop(identity);
+    let u = o.switch_guard.sample(Instant::now(), hasher.finish());
+    if u.changed { o.monitor.metrics.changes += 1; }
+    if u.returned { o.monitor.metrics.returns += 1; }
+    if u.cue { o.monitor.metrics.check_ins += 1; }
+    o.detail = if o.switch_guard.on_reference() { "Reference tab · staying quiet" }
+        else if u.cue { "Tab changed · reminder offered" } else { "Different tab · watching for return" }.into();
+    let mut status = o.status(); status.cue = u.cue;
+    drop(o);
+    if u.anchored { eprintln!("[Oplyra monitor] reference registered"); post_cue(app, generation, 2); }
+    if u.changed { eprintln!("[Oplyra monitor] Chrome tab ID changed"); }
+    if u.returned { eprintln!("[Oplyra monitor] returned to reference"); dismiss_cue(app); }
+    Ok(status)
+}
+fn publish_status(app: &AppHandle, generation: u64, result: Result<ScreenStatus, String>, is_switch: bool) {
+    if let Some(window) = app.get_webview_window("main") {
+        match result {
+            Ok(mut status) => {
+                if status.cue { post_cue(app, generation, if is_switch { 1 } else { 0 }); status.cue = false; }
+                let _ = window.emit("oplyra-screen-status", status);
+            }
+            Err(error) => { dismiss_cue(app); let _ = window.emit("oplyra-screen-error", error); }
+        }
+    }
+}
 pub fn start_worker(app: AppHandle) {
+    let local = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(2));
+        let generation = local.state::<ScreenState>().observation.lock().ok()
+            .and_then(|o| if o.switch_watch && o.selection.is_some() { Some(o.generation) } else { None });
+        if let Some(generation) = generation {
+            let result = switch_tick(&local, generation);
+            publish_status(&local, generation, result, true);
+        }
+    });
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(5));
-        let active = app.state::<ScreenState>().observation.lock().map(|o| o.selection.is_some()).unwrap_or(false);
-        if !active { continue; }
-        let result = tauri::async_runtime::block_on(sample_screen(app.clone()));
-        if let Some(window) = app.get_webview_window("main") {
-            match result {
-                Ok(status) => { let _ = window.emit("oplyra-screen-status", status); }
-                Err(error) => { let _ = window.emit("oplyra-screen-error", error); }
-            }
+        let generation = app.state::<ScreenState>().observation.lock().ok()
+            .and_then(|o| if !o.switch_watch && o.selection.is_some() { Some(o.generation) } else { None });
+        if let Some(generation) = generation {
+            let result = tauri::async_runtime::block_on(sample_screen(app.clone()));
+            publish_status(&app, generation, result, false);
         }
     });
 }
@@ -558,6 +691,9 @@ mod platform {
         fn oplyra_screen_list() -> *mut c_char;
         fn oplyra_screen_capture(id: u32, pid: i32, bundle: *const c_char) -> *mut c_char;
         fn oplyra_screen_free(value: *mut c_char);
+        fn oplyra_chrome_foreground_pid() -> i32;
+        fn oplyra_show_focus_cue(anchor: *mut std::ffi::c_void, is_switch: i32) -> i32;
+        fn oplyra_dismiss_focus_cue();
     }
     #[derive(Deserialize)]
     struct ResultData { error: Option<String>, windows: Option<Vec<WindowChoice>>, text: Option<String>, inactive: Option<bool> }
@@ -572,6 +708,42 @@ mod platform {
         if let Some(ref error) = result.error { return Err(error.clone()); }
         Ok(result)
     }
+    pub fn foreground_identity() -> Result<(Option<String>, Option<String>), String> {
+        // Only ask Chrome while it is actually the foreground app.
+        let pid = unsafe { oplyra_chrome_foreground_pid() };
+        if pid <= 0 { return Ok((None, Some("Waiting for Google Chrome in the foreground".into()))); }
+        let mut child = std::process::Command::new("/usr/bin/osascript")
+            .arg("-e").arg(crate::chrome_tab::SCRIPT)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+            .env_remove("GROQ_API_KEY").env_remove("DEEPSEEK_API_KEY")
+            .spawn().map_err(|_| "Could not start macOS Chrome tab reader")?;
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if started.elapsed() < Duration::from_secs(30) => std::thread::sleep(Duration::from_millis(40)),
+                _ => { let _ = child.kill(); let _ = child.wait(); return Err("Chrome Automation query timed out; allow access and enable reminders again".into()); }
+            }
+        }
+        let out = child.wait_with_output().map_err(|_| "Could not read Chrome Automation result")?;
+        if !out.status.success() {
+            let error = String::from_utf8_lossy(&out.stderr);
+            if error.contains("-1743") || error.contains("-1744") {
+                return Err("Chrome Automation permission denied. Enable Google Chrome in System Settings > Privacy & Security > Automation, then enable reminders again.".into());
+            }
+            return Err("Chrome Automation query failed. Check permission and keep a normal Chrome window open.".into());
+        }
+        if unsafe { oplyra_chrome_foreground_pid() } != pid {
+            return Ok((None, Some("Foreground application changed during check".into())));
+        }
+        let output = std::str::from_utf8(&out.stdout).map_err(|_| "Invalid Chrome tab response")?;
+        crate::chrome_tab::parse(output, pid)
+    }
+    pub fn show_cue(window: &tauri::WebviewWindow, kind: i32) -> bool {
+        window.ns_window().ok().is_some_and(|ptr| unsafe { oplyra_show_focus_cue(ptr, kind) != 0 })
+    }
+    pub fn dismiss_cue() { unsafe { oplyra_dismiss_focus_cue() } }
     pub fn supported() -> bool { unsafe { oplyra_screen_supported() != 0 } }
     pub fn request_permission() -> bool { unsafe { oplyra_screen_request_permission() != 0 } }
     pub fn list() -> Result<Vec<WindowChoice>, String> {
@@ -586,6 +758,8 @@ mod platform {
 #[cfg(not(target_os = "macos"))]
 mod platform {
     use super::*;
+    pub fn foreground_identity() -> Result<(Option<String>, Option<String>), String> { Ok((None, None)) }
+    pub fn show_cue(_: &tauri::WebviewWindow, _: i32) -> bool { false }
     pub fn supported() -> bool { false }
     pub fn request_permission() -> bool { false }
     pub fn list() -> Result<Vec<WindowChoice>, String> { Err("Screen observation is macOS-only".into()) }

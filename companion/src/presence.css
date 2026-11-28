@@ -1,0 +1,69 @@
+/* Transform/opacity based animation, no per-frame JS or native resize. */
+.living-character { width:100%;height:100%;overflow:visible;filter:drop-shadow(0 4px 5px #50438a20); }
+.living-motion,.living-body { transform-origin:102px 145px; }
+.living-body { animation:living-breathe 4.8s ease-in-out infinite; }
+.living-eyes { transform-origin:104px 93px;animation:living-blink 6.7s infinite; }
+.living-gaze { transform:translate(var(--gaze-x,0px),var(--gaze-y,0px));transition:transform 130ms ease-out; }
+.living-ear.left-ear { transform-origin:83px 52px; }
+.living-ear.right-ear { transform-origin:132px 52px; }
+.living-arm.left-arm { transform-origin:59px 112px; }
+.living-arm.right-arm { transform-origin:150px 112px; }
+.pose-idle .living-motion { animation:living-float 5s ease-in-out infinite; }
+.pose-work .living-body,.pose-turn-page .living-body { animation-duration:7s; }
+.pose-work .living-gaze,.pose-turn-page .living-gaze { transform:translate(0,3px); }
+.pose-work .living-book { animation:living-book 8s ease-in-out infinite;transform-origin:103px 145px; }
+.pose-rest .living-body { animation:living-rest 5.5s ease-in-out infinite; }
+.pose-rest .living-motion,.pose-yawn .living-motion { transform:translateY(7px); }
+.pose-curious .living-motion { animation:living-curious 480ms cubic-bezier(.2,.8,.2,1) both; }
+.pose-curious .right-ear { transform:rotate(12deg); }
+.pose-touch .living-motion { transform:scale(1.09,.86) translateY(3px);transition:transform 100ms; }
+.pose-touch .left-ear { transform:rotate(-18deg); }
+.pose-touch .right-ear { transform:rotate(18deg); }
+.pose-carried .living-motion { animation:living-carried .75s ease-in-out infinite alternate; }
+.pose-carried .left-arm { transform:rotate(30deg); }
+.pose-carried .right-arm { transform:rotate(-30deg); }
+.pose-carried .living-feet { transform:translateY(4px); }
+.pose-settle .living-motion { animation:living-settle .75s ease-out both; }
+.pose-listening .living-motion { transform:rotate(-4deg);transition:transform 160ms; }
+.pose-listening .left-ear { transform:rotate(-9deg); }
+.pose-thinking .living-motion { transform:rotate(5deg); }
+.pose-thinking .living-gaze { transform:translate(3px,-4px); }
+.thought-dots circle { animation:living-dot 1.2s ease-in-out infinite; }
+.thought-dots circle:nth-child(2) { animation-delay:.18s; }
+.thought-dots circle:nth-child(3) { animation-delay:.36s; }
+.pose-encourage .living-motion { animation:living-nod .8s ease-in-out 2; }
+.pose-encourage .right-arm { animation:living-wave .8s ease-in-out 2; }
+.living-signal { animation:living-dot 1.5s ease-in-out 2; }
+.pose-celebrate .living-motion { animation:living-cheer .8s ease-out 2; }
+.pose-celebrate .left-arm { transform:rotate(42deg); }
+.pose-celebrate .right-arm { transform:rotate(-42deg); }
+.living-sparkles { animation:living-spark 1s ease-in-out 2;transform-origin:103px 85px; }
+.pose-stretch .living-motion { animation:living-stretch 1.85s ease-in-out both; }
+.pose-stretch .left-arm { animation:living-wave 1.8s ease-in-out both; }
+.pose-stretch .right-arm { animation:living-wave 1.8s ease-in-out both reverse; }
+.pose-look-around .living-motion { animation:living-look 1.85s ease-in-out both; }
+.pose-look-around .living-gaze { animation:living-scan 1.8s ease-in-out both; }
+.living-page { transform-origin:103px 143px;animation:living-page-turn 1.7s ease-in-out both; }
+.pose-yawn .living-body { animation:living-yawn 1.7s ease-in-out both; }
+.living-sleep { animation:living-z 3.2s ease-in-out infinite; }
+@keyframes living-breathe { 0%,100% {transform:scale(1)} 50% {transform:scale(1.018,.975)} }
+@keyframes living-rest { 0%,100% {transform:scale(1.04,.93)} 50% {transform:scale(1.06,.96)} }
+@keyframes living-blink { 0%,39%,43%,77%,81%,100% {transform:scaleY(1)} 41%,79% {transform:scaleY(.08)} }
+@keyframes living-float { 0%,100% {transform:translateY(0)} 50% {transform:translateY(-3px)} }
+@keyframes living-curious { from {transform:rotate(0)} to {transform:translateY(-3px) rotate(-8deg)} }
+@keyframes living-carried { from {transform:translateY(-5px) rotate(-9deg)} to {transform:translateY(-7px) rotate(9deg)} }
+@keyframes living-settle { 0% {transform:translateY(-6px)} 35% {transform:scale(1.08,.88)} 68% {transform:translateY(-3px) scale(.97,1.04)} 100% {transform:none} }
+@keyframes living-dot { 0%,100% {opacity:.25} 50% {opacity:1} }
+@keyframes living-nod { 0%,100% {transform:rotate(0)} 50% {transform:rotate(8deg) translateY(2px)} }
+@keyframes living-wave { 0%,100% {transform:rotate(0)} 50% {transform:rotate(-34deg)} }
+@keyframes living-cheer { 0%,100% {transform:none} 35% {transform:translateY(-10px) scale(.98,1.04)} 75% {transform:scale(1.06,.93)} }
+@keyframes living-spark { 0%,100% {opacity:.2;transform:scale(.9)} 50% {opacity:1;transform:scale(1.06)} }
+@keyframes living-stretch { 0%,100% {transform:none} 35%,60% {transform:scale(.94,1.08) translateY(-4px)} }
+@keyframes living-look { 0%,100% {transform:none} 25% {transform:rotate(-7deg)} 72% {transform:rotate(7deg)} }
+@keyframes living-scan { 0%,100% {transform:none} 25% {transform:translate(-5px,-1px)} 72% {transform:translate(5px,-1px)} }
+@keyframes living-page-turn { 0%,100% {transform:scaleX(1);opacity:1} 55% {transform:scaleX(-.8);opacity:.85} }
+@keyframes living-book { 0%,100% {transform:rotate(-1deg)} 50% {transform:rotate(1deg)} }
+@keyframes living-yawn { 0%,100% {transform:scale(1.03,.96)} 40%,65% {transform:scale(.98,1.04)} }
+@keyframes living-z { 0%,100% {opacity:.3;transform:translateY(2px)} 50% {opacity:.85;transform:translateY(-4px)} }
+.living-character.motion-paused * { animation-play-state:paused!important; }
+@media(prefers-reduced-motion:reduce) { .living-character * { animation:none!important;transition:none!important; } }

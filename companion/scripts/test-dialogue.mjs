@@ -7,7 +7,7 @@ const input = await readFile(new URL("../src/dialogue.ts", import.meta.url), "ut
 const { outputText } = ts.transpileModule(input, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
 });
-const { planMessage, restingBehaviour, actionAllowed, confirmedPlan, resolveConfirmation, proposalQuestion, rememberTurn, awarenessCommand, screenCommand, monitoringRequest, monitoringGoalFromRequest } = await import("data:text/javascript;base64," + Buffer.from(outputText).toString("base64"));
+const { planMessage, restingBehaviour, actionAllowed, confirmedPlan, resolveConfirmation, proposalQuestion, rememberTurn, awarenessCommand, screenCommand, monitoringRequest, monitoringGoalFromRequest, focusDeclaration } = await import("data:text/javascript;base64," + Buffer.from(outputText).toString("base64"));
 const cases = [
   ["Let's study together.", "idle", "start", "working"],
   ["I need to work on my paper", "idle", "start", "working"],
@@ -110,3 +110,74 @@ assert.equal(monitoringGoalFromRequest("Please watch my screen", "Read reliabili
 assert.equal(monitoringGoalFromRequest("I am reading this document and get me on track if I get diverted", ""), "I am reading this document");
 assert.equal(monitoringGoalFromRequest("Remind me if I switch tabs", ""), "");
 console.log("Monitoring goal extraction assertions passed.");
+
+
+// Embodied presence is independent of native and cloud intelligence.
+const presenceSource = await readFile(new URL("../src/presence.ts", import.meta.url), "utf8");
+const {outputText: presenceJs} = ts.transpileModule(presenceSource, {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}});
+const {choosePose, basePose, reactionPose, autonomousMove, canAnimateAmbient, scheduleAmbient} = await import("data:text/javascript;base64," + Buffer.from(presenceJs).toString("base64"));
+const neutral = {phase:"idle",dragging:false,pressed:false,busy:false,reminder:false,expanded:false,hovered:false,gesture:null,response:null,ambient:null};
+assert.equal(choosePose(neutral),"idle");
+assert.equal(choosePose({...neutral,phase:"running"}),"work");
+assert.equal(choosePose({...neutral,phase:"paused"}),"rest");
+assert.equal(choosePose({...neutral,hovered:true}),"curious");
+assert.equal(choosePose({...neutral,pressed:true,ambient:"stretch"}),"touch");
+assert.equal(choosePose({...neutral,dragging:true,pressed:true,busy:true}),"carried");
+assert.equal(choosePose({...neutral,gesture:"settle",hovered:true}),"settle");
+assert.equal(choosePose({...neutral,busy:true,response:"celebrate"}),"thinking");
+assert.equal(choosePose({...neutral,reminder:true,ambient:"stretch"}),"encourage");
+assert.equal(choosePose({...neutral,response:"celebrate"}),"celebrate");
+assert.equal(choosePose({...neutral,expanded:true,ambient:"look-around"}),"listening");
+assert.equal(choosePose({...neutral,ambient:"stretch"}),"stretch");
+assert.equal(reactionPose("working"),null);
+assert.equal(reactionPose("celebrating"),"celebrate");
+assert.equal(basePose("running"),"work");
+assert.equal(autonomousMove("idle",.1,false).pose,"stretch");
+assert.equal(autonomousMove("idle",.9,false).pose,"look-around");
+assert.equal(autonomousMove("running",.5,true).pose,"turn-page");
+assert.ok(autonomousMove("running",.5,true).delay > autonomousMove("running",.5,false).delay);
+assert.equal(autonomousMove("paused",.5,false).pose,"yawn");
+assert.equal(canAnimateAmbient(neutral),true);
+for(const key of ["dragging","pressed","busy","reminder","expanded","hovered"]) assert.equal(canAnimateAmbient({...neutral,[key]:true}),false);
+assert.equal(canAnimateAmbient({...neutral,response:"encourage"}),false);
+assert.equal(choosePose({...neutral,phase:"running",response:null,ambient:null}),"work");
+console.log("Embodied presence policy assertions passed.");
+
+let nextId=0;
+const scheduled=new Map(), emitted=[];
+const clock={set(fn,ms){const id=++nextId;scheduled.set(id,{fn,ms});return id;},clear(id){scheduled.delete(id);},random:()=>0};
+function fireNext(){const [id,job]=scheduled.entries().next().value;scheduled.delete(id);job.fn();return job.ms;}
+const cancel=scheduleAmbient("idle",false,p=>emitted.push(p),clock);
+assert.equal(scheduled.size,1);
+assert.equal(fireNext(),12000);
+assert.deepEqual(emitted,["stretch"]);
+assert.equal(fireNext(),1900);
+assert.deepEqual(emitted,["stretch",null]);
+assert.equal(scheduled.size,1);
+cancel();
+assert.equal(scheduled.size,0);
+const stop=scheduleAmbient("running",true,p=>emitted.push(p),clock);
+assert.equal(fireNext(),65000);
+assert.equal(emitted.at(-1),"turn-page");
+const stale=scheduled.values().next().value.fn;
+stop();stale();
+assert.equal(scheduled.size,0);
+assert.equal(emitted.at(-1),"turn-page");
+console.log("Autonomous scheduler cancellation and recurrence assertions passed.");
+
+assert.equal(focusDeclaration("I am focusing on reliability engineering."),"I am focusing on reliability engineering.");
+assert.equal(focusDeclaration("I'm reading this document"),"I'm reading this document");
+assert.equal(focusDeclaration("I'm not focusing on anything"),null);
+assert.equal(focusDeclaration("I am focusing on this?"),null);
+assert.equal(focusDeclaration("I am exhausted"),null);
+console.log("Concrete focus declaration routing assertions passed.");
+
+const controlSource = await readFile(new URL("../src/controlLogic.ts", import.meta.url), "utf8");
+const {outputText:controlJs}=ts.transpileModule(controlSource,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}});
+const {sessionActions,elapsedLabel}=await import("data:text/javascript;base64,"+Buffer.from(controlJs).toString("base64"));
+assert.deepEqual(sessionActions("idle"),["start"]);
+assert.deepEqual(sessionActions("running"),["pause","finish"]);
+assert.deepEqual(sessionActions("paused"),["resume","finish"]);
+assert.equal(elapsedLabel(3661999),"01:01:01");
+assert.equal(elapsedLabel(-1),"00:00:00");
+console.log("Control Center phase and elapsed time tests passed");

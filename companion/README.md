@@ -65,3 +65,11 @@ See [FOLLOW_CONTEXT_V0112.md](FOLLOW_CONTEXT_V0112.md). One session opt-in, no w
 ## v0.12 proactive monitoring preview
 
 See [PROACTIVE_MONITOR_V012.md](PROACTIVE_MONITOR_V012.md). Small floating companion, separate maximizable analytics window, explicitly authorized automatic goal-relative checks, improved OCR and bounded passive reminders.
+
+## v0.13 embodied presence
+
+See [EMBODIED_PRESENCE_V013.md](EMBODIED_PRESENCE_V013.md). Independent local character behaviour, responsive facial expressions, touch and drag reactions, sparse autonomous gestures and time-limited dialogue reactions. No additional inference, sensing or permissions.
+
+## v0.13.1 — local tab-switch speech reminders
+
+See [TAB_REMINDERS_V0131.md](TAB_REMINDERS_V0131.md). Explicit local reference-tab monitoring and a native non-activating speech panel outside the compact webview.

@@ -178,3 +178,107 @@ char *oplyra_screen_capture(uint32_t wid, int32_t pid, const char *bundle_utf8) 
         return failure(@"Window capture requires macOS 14 or newer");
     }
 }
+
+
+// Metadata only: no pixel capture, OCR, browser extensions or URLs.
+// Cheap local foreground check. No browser metadata or content.
+int32_t oplyra_chrome_foreground_pid(void) {
+    @autoreleasepool {
+        NSRunningApplication *active = NSWorkspace.sharedWorkspace.frontmostApplication;
+        if ([active.bundleIdentifier isEqualToString:@"com.google.Chrome"]) return active.processIdentifier;
+        return 0;
+    }
+}
+
+@interface OplyraCuePanel : NSPanel
+@end
+@implementation OplyraCuePanel
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeMainWindow { return NO; }
+@end
+@interface OplyraCueView : NSView
+@property(nonatomic, copy) NSString *message;
+@property(nonatomic) NSInteger side;
+@end
+@implementation OplyraCueView
+- (BOOL)isFlipped { return YES; }
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    NSRect rect = NSInsetRect(self.bounds, 5, 5);
+    if (self.side == -1) rect.size.width -= 10;
+    else if (self.side == 1) { rect.origin.x += 10; rect.size.width -= 10; }
+    else rect.size.height -= 10;
+    NSBezierPath *path = [NSBezierPath bezierPathWithRoundedRect:rect xRadius:15 yRadius:15];
+    CGFloat edge = self.side == -1 ? NSMaxX(rect) : NSMinX(rect);
+    CGFloat cy = NSMidY(rect);
+    NSBezierPath *tail = [NSBezierPath bezierPath];
+    if (self.side != 0) {
+        [tail moveToPoint:NSMakePoint(edge + (self.side == -1 ? -2 : 2), cy - 8)];
+        [tail lineToPoint:NSMakePoint(edge + (self.side == -1 ? 10 : -10), cy + 6)];
+        [tail lineToPoint:NSMakePoint(edge + (self.side == -1 ? -2 : 2), cy + 12)];
+    } else {
+        [tail moveToPoint:NSMakePoint(NSMidX(rect)-9, NSMaxY(rect)-2)];
+        [tail lineToPoint:NSMakePoint(NSMidX(rect), NSMaxY(rect)+10)];
+        [tail lineToPoint:NSMakePoint(NSMidX(rect)+9, NSMaxY(rect)-2)];
+    }
+    [tail closePath];
+    [[NSColor colorWithSRGBRed:.83 green:.77 blue:.95 alpha:1] setStroke];
+    [path setLineWidth:1]; [path stroke];
+    [[NSColor colorWithSRGBRed:.98 green:.96 blue:1 alpha:.98] setFill];
+    [path fill]; [tail fill];
+    NSMutableParagraphStyle *style = [NSMutableParagraphStyle new];
+    style.lineBreakMode = NSLineBreakByWordWrapping;
+    NSDictionary *attrs = @{NSFontAttributeName:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold],
+       NSForegroundColorAttributeName:[NSColor colorWithSRGBRed:.27 green:.22 blue:.39 alpha:1],
+       NSParagraphStyleAttributeName:style};
+    [self.message drawWithRect:NSInsetRect(rect, 13, 11)
+       options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading attributes:attrs];
+}
+@end
+static OplyraCuePanel *cue_panel = nil;
+static uint64_t cue_epoch = 0;
+void oplyra_dismiss_focus_cue(void) {
+    ++cue_epoch;
+    if (cue_panel) { [cue_panel orderOut:nil]; [cue_panel close]; cue_panel = nil; }
+}
+int oplyra_show_focus_cue(void *raw_anchor, int kind) {
+    @autoreleasepool {
+        if (![NSThread isMainThread] || !raw_anchor) return 0;
+        NSWindow *anchor = (__bridge NSWindow *)raw_anchor;
+        if (!anchor.isVisible || !anchor.screen || anchor.frame.size.width > 240) return 0;
+        oplyra_dismiss_focus_cue();
+        NSRect a = anchor.frame, area = anchor.screen.visibleFrame;
+        CGFloat width = MIN(235, area.size.width - 12), height = 72;
+        if (width < 150 || area.size.height < height + 12) return 0;
+        NSInteger side = -1;
+        CGFloat x = NSMinX(a) - width + 10;
+        CGFloat y = NSMidY(a) + 10;
+        if (x < NSMinX(area)+4) { side = 1; x = NSMaxX(a)-10; }
+        if (x + width > NSMaxX(area)-4) {
+            side = 0; x = NSMidX(a)-width/2; y = NSMaxY(a)-4;
+        }
+        x = MAX(NSMinX(area)+4, MIN(x, NSMaxX(area)-width-4));
+        y = MAX(NSMinY(area)+4, MIN(y, NSMaxY(area)-height-4));
+        OplyraCuePanel *panel = [[OplyraCuePanel alloc] initWithContentRect:NSMakeRect(x,y,width,height)
+            styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+            backing:NSBackingStoreBuffered defer:NO];
+        panel.releasedWhenClosed = NO;
+        panel.opaque = NO; panel.backgroundColor = NSColor.clearColor;
+        panel.hasShadow = NO; panel.ignoresMouseEvents = YES;
+        panel.hidesOnDeactivate = NO; panel.floatingPanel = YES;
+        panel.excludedFromWindowsMenu = YES;
+        panel.collectionBehavior = NSWindowCollectionBehaviorTransient | NSWindowCollectionBehaviorIgnoresCycle;
+        panel.level = anchor.level + 1;
+        OplyraCueView *view = [[OplyraCueView alloc] initWithFrame:NSMakeRect(0,0,width,height)];
+        view.side = side;
+        view.message = kind == 2 ? @"Focus tab set. I’ll keep you on track." : kind == 3 ? @"Hi! Your reminder bubble works." : kind == 1 ? @"Hey, switched tabs. Back to your focus?" : @"Hey, still on your task? Ready to get back to it?";
+        panel.contentView = view;
+        cue_panel = panel;
+        [panel orderFrontRegardless];
+        uint64_t epoch = cue_epoch;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            if (epoch == cue_epoch) oplyra_dismiss_focus_cue();
+        });
+        return 1;
+    }
+}
